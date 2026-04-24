@@ -3,6 +3,17 @@ name = "lark-report-bot"
 main = "src/index.js"
 compatibility_date = "2026-04-24"
 
-[[kv_namespaces]]
-binding = "REPORT_SESSIONS"
-id = "d68d367f9db54e5f8c5067c3cca0077b"
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1
