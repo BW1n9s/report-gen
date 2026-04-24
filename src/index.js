@@ -1,15 +1,11 @@
 /**
- * Lark Report Generator - Multi-path ID Recovery (Final)
+ * Lark Report Generator - Schema 2.0 Final Fix
  */
 
 // =====================
-// Utils
+// Utils & Encryption (保持不变)
 // =====================
-
-function b64ToUint8Array(base64) {
-  return new Uint8Array(atob(base64).split("").map(c => c.charCodeAt(0)));
-}
-
+function b64ToUint8Array(base64) { return new Uint8Array(atob(base64).split("").map(c => c.charCodeAt(0))); }
 async function decrypt(encrypt, key) {
   const encryptedBuffer = b64ToUint8Array(encrypt);
   const iv = encryptedBuffer.slice(0, 16);
@@ -20,22 +16,19 @@ async function decrypt(encrypt, key) {
   const decrypted = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, aesKey, data);
   return JSON.parse(new TextDecoder().decode(decrypted).replace(/[\x00-\x1F\x7F-\x9F]/g, ""));
 }
-
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
-  const chunkSize = 8192;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
+  for (let i = 0; i < bytes.length; i += 8192) {
+    const chunk = bytes.subarray(i, i + 8192);
     for (let j = 0; j < chunk.length; j++) binary += String.fromCharCode(chunk[j]);
   }
   return btoa(binary);
 }
 
 // =====================
-// Lark API
+// Lark API Helpers
 // =====================
-
 async function getToken(env) {
   const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
     method: "POST",
@@ -60,8 +53,8 @@ async function sendGuideCard(chatId, token) {
           {
             tag: "action",
             actions: [
-              { tag: "button", text: { tag: "plain_text", content: "PD Report" }, type: "primary", value: { type: "PD", action: "start" } },
-              { tag: "button", text: { tag: "plain_text", content: "Service Report" }, type: "default", value: { type: "Service", action: "start" } }
+              { tag: "button", text: { tag: "plain_text", content: "PD Report" }, type: "primary", value: { action: "start", type: "PD" } },
+              { tag: "button", text: { tag: "plain_text", content: "Service Report" }, type: "default", value: { action: "start", type: "Service" } }
             ]
           }
         ]
@@ -78,20 +71,13 @@ async function sendTextMsg(chatId, text, token) {
   });
 }
 
-// =====================
-// Gemini AI
-// =====================
-
 async function askGemini(imageBuffer, env) {
-  const model = env.GEMINI_MODEL || "gemini-2.0-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
-  const base64Image = arrayBufferToBase64(imageBuffer);
-  const prompt = "识别这张工程机械图片，返回 Model/Serial/VIN 或 Hours，简洁返回。";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${env.GEMINI_MODEL || "gemini-2.0-flash"}:generateContent?key=${env.GEMINI_API_KEY}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: base64Image } }] }]
+      contents: [{ parts: [{ text: "识别这张工程机械图片，返回 Model/Serial/VIN 或 Hours，简洁返回。" }, { inline_data: { mime_type: "image/jpeg", data: arrayBufferToBase64(imageBuffer) } }] }]
     })
   });
   const data = await res.json();
@@ -99,68 +85,40 @@ async function askGemini(imageBuffer, env) {
 }
 
 // =====================
-// Worker
+// Worker Main
 // =====================
-
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") return new Response("OK");
-
     let body = await request.json();
 
-    if (body.encrypt) {
-      try {
-        body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
-      } catch (e) {
-        return new Response("Decrypt Failed", { status: 500 });
-      }
-    }
-
+    if (body.encrypt) body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
     if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
 
-    // ⭐ 最终极的 ID 搜寻路径 (按优先级排序)
-    const chatId = 
-      body.action?.open_chat_id || 
-      body.open_chat_id || 
-      body.context?.open_chat_id || 
-      body.action?.context?.open_chat_id || 
-      body.event?.message?.chat_id;
-
-    const isCardAction = !!(body.action || body.schema === "2.0");
+    // ⭐ 针对日志结构的精准 ID 提取
+    const isCardAction = body.schema === "2.0" || !!body.action;
+    const chatId = body.event?.context?.open_chat_id || body.open_chat_id || body.event?.message?.chat_id;
     const messageId = body.event?.message?.message_id;
 
     console.log(`[Debug] isCard=${isCardAction}, ChatID=${chatId}`);
 
-    if (!chatId) {
-      console.log("[Critical] ID still missing. Full Body:", JSON.stringify(body));
-      return new Response(JSON.stringify({ code: 0 }));
-    }
-
+    if (!chatId) return new Response(JSON.stringify({ code: 0 }));
     const token = await getToken(env);
 
     ctx.waitUntil((async () => {
       try {
-        // --- 逻辑 1: 处理卡片按钮点击 ---
-        // 兼容 body.action.value 或直接 body.action (取决于飞书协议版本)
-        const actionValue = body.action?.value || body.action;
-        
-        if (isCardAction && actionValue?.action === "start") {
-          const startType = actionValue.type;
-          console.log(`[Flow] Initializing ${startType} session for ${chatId}`);
-          
+        // --- 1. 处理卡片点击 ---
+        const cardAction = body.event?.action || body.action;
+        if (isCardAction && cardAction?.value?.action === "start") {
+          const startType = cardAction.value.type;
           await env.REPORT_SESSIONS.put(chatId, JSON.stringify({
-            report_type: startType,
-            status: "collecting",
-            images: [],
-            notes: [],
-            start_at: Date.now()
+            report_type: startType, status: "collecting", images: [], notes: [], start_at: Date.now()
           }), { expirationTtl: 86400 });
-          
-          await sendTextMsg(chatId, `🚀 已开启 ${startType} Report 会话！\n请发送图片或备注，完成后输入“结束”。`, token);
+          await sendTextMsg(chatId, `🚀 已开启 ${startType} 会话！\n发送图片或备注，输入“结束”完成。`, token);
           return;
         }
 
-        // --- 逻辑 2: 准入与业务流程 ---
+        // --- 2. 检查 Session ---
         const sessionRaw = await env.REPORT_SESSIONS.get(chatId);
         if (!sessionRaw) {
           await sendGuideCard(chatId, token);
@@ -168,43 +126,42 @@ export default {
         }
         const session = JSON.parse(sessionRaw);
 
-        // 文字处理
-        if (body.event?.message?.message_type === "text") {
-          const text = JSON.parse(body.event.message.content).text;
-          if (text === "结束" || text === "end") {
-            await sendTextMsg(chatId, `✅ 结束！已记录 ${session.images?.length || 0} 图。`, token);
-            await env.REPORT_SESSIONS.delete(chatId);
-            return;
+        // --- 3. 处理消息事件 ---
+        if (body.event?.message) {
+          const msg = body.event.message;
+          
+          // 处理文本
+          if (msg.message_type === "text") {
+            const text = JSON.parse(msg.content).text;
+            if (text === "结束" || text === "end") {
+              await sendTextMsg(chatId, `✅ 会话结束！已记录 ${session.images.length} 图。`, token);
+              await env.REPORT_SESSIONS.delete(chatId);
+              return;
+            }
+            session.notes.push({ text, ts: Date.now() });
+            await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
+            await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`, {
+              method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ msg_type: "text", content: JSON.stringify({ text: "✍️ 已记录" }) })
+            });
           }
-          session.notes = session.notes || [];
-          session.notes.push({ text, ts: Date.now() });
-          await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
-          await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ msg_type: "text", content: JSON.stringify({ text: "✍️ 已记录" }) })
-          });
-        }
 
-        // 图片处理
-        if (body.event?.message?.message_type === "image") {
-          const imageKey = JSON.parse(body.event.message.content).image_key;
-          const imgRes = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${imageKey}?type=image`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          const result = await askGemini(await imgRes.arrayBuffer(), env);
-          session.images = session.images || [];
-          session.images.push({ imageKey, result, ts: Date.now() });
-          await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
-          await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ msg_type: "text", content: JSON.stringify({ text: `📸 已记录\n识别：${result}` }) })
-          });
+          // 处理图片
+          if (msg.message_type === "image") {
+            const imageKey = JSON.parse(msg.content).image_key;
+            const imgRes = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${imageKey}?type=image`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            const result = await askGemini(await imgRes.arrayBuffer(), env);
+            session.images.push({ imageKey, result, ts: Date.now() });
+            await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
+            await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`, {
+              method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ msg_type: "text", content: JSON.stringify({ text: `📸 已记录\n识别：${result}` }) })
+            });
+          }
         }
-      } catch (e) {
-        console.error("Runtime Error:", e.message);
-      }
+      } catch (e) { console.error("ERR:", e.message); }
     })());
 
     return new Response(JSON.stringify({ code: 0 }));
