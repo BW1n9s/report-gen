@@ -54,18 +54,17 @@ async function decrypt(encrypt, key) {
   return JSON.parse(text);
 }
 
-function b64ToUint8Array(base64) {
-  return new Uint8Array(atob(base64).split("").map((c) => c.charCodeAt(0)));
-}
-
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
-  const chunkSize = 0x8000;
+  const chunkSize = 8192;
 
   for (let i = 0; i < bytes.length; i += chunkSize) {
     const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
+
+    for (let j = 0; j < chunk.length; j++) {
+      binary += String.fromCharCode(chunk[j]);
+    }
   }
 
   return btoa(binary);
@@ -282,13 +281,15 @@ function confirmEndCard(missingFields) {
 // Session
 // =====================
 
-function getUserId(event) {
+function getSessionOwnerId(event) {
   return (
-    event?.sender?.sender_id?.open_id ||
-    event?.sender?.sender_id?.user_id ||
+    event?.message?.chat_id ||
+    event?.context?.open_chat_id ||
     event?.operator?.operator_id?.open_id ||
+    event?.sender?.sender_id?.open_id ||
     event?.operator?.operator_id?.user_id ||
-    "unknown_user"
+    event?.sender?.sender_id?.user_id ||
+    "unknown_session"
   );
 }
 
@@ -685,7 +686,7 @@ async function appendImageBlock(documentId, parentBlockId, imageToken, token) {
 
 async function handleTextMessage(event, env, token) {
   const messageId = event.message.message_id;
-  const userId = getUserId(event);
+  const userId = getSessionOwnerId(event);
   const text = JSON.parse(event.message.content).text.trim();
   const lower = text.toLowerCase();
 
@@ -737,7 +738,7 @@ async function handleTextMessage(event, env, token) {
 
 async function handleImageMessage(event, env, token) {
   const messageId = event.message.message_id;
-  const userId = getUserId(event);
+  const userId = getSessionOwnerId(event);
 
   let session = await getSession(env, userId);
 
@@ -802,7 +803,7 @@ async function handleCardAction(body, env, token) {
   const actionName = action.action;
   const reportType = action.report_type;
 
-  const userId = getUserId(body.event);
+  const userId = getSessionOwnerId(body.event);
   const openMessageId = body?.event?.context?.open_message_id;
 
   if (!openMessageId) return;
