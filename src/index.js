@@ -13,6 +13,18 @@ const arrayBufferToBase64 = (buf) => {
   return btoa(binary);
 };
 
+// 报错的原因是 fetch 找不到这个函数，请确保它存在
+async function decrypt(encrypt, key) {
+  const encryptedBuffer = b64ToUint8Array(encrypt);
+  const iv = encryptedBuffer.slice(0, 16);
+  const data = encryptedBuffer.slice(16);
+  const encoder = new TextEncoder();
+  const keyBuffer = await crypto.subtle.digest("SHA-256", encoder.encode(key));
+  const aesKey = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, aesKey, data);
+  return JSON.parse(new TextDecoder().decode(decrypted).replace(/[\x00-\x1F\x7F-\x9F]/g, ""));
+}
+
 // =====================
 // 2. 增强版 ID 提取器
 // =====================
@@ -66,28 +78,26 @@ async function askGemini(imageBuffer, env) {
 // =====================
 export default {
   async fetch(request, env, ctx) {
-    if (request.method !== "POST") return new Response("Not POST");
+    if (request.method !== "POST") return new Response("OK");
     
     let body;
     try {
       body = await request.json();
-    } catch (e) {
-      return new Response("Invalid JSON");
-    }
-
-    // 1. 处理 Lark 的加密验证 (如果有)
-    if (body.encrypt) {
-      console.log("[Debug] Decrypting payload...");
-      // 注意：确保你的 FEISHU_ENCRYPT_KEY 在环境变量里正确设置
-      try {
+      
+      // 关键修复：处理解密
+      if (body.encrypt) {
+        console.log("[Debug] Decrypting payload...");
+        if (!env.FEISHU_ENCRYPT_KEY) {
+          throw new Error("Missing FEISHU_ENCRYPT_KEY in environment variables");
+        }
         body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
-      } catch (e) {
-        console.error("[Error] Decrypt failed:", e.message);
-        return new Response("Decrypt Error");
       }
+    } catch (e) {
+      console.error("[Error] Request processing failed:", e.message);
+      return new Response(JSON.stringify({ code: 1, msg: e.message }));
     }
 
-    // 2. 处理 Lark 的 URL 验证
+    // 处理飞书验证
     if (body.type === "url_verification") {
       return new Response(JSON.stringify({ challenge: body.challenge }));
     }

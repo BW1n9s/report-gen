@@ -2,11 +2,12 @@
 name = "lark-report-bot"
 main = "src/index.js"
 compatibility_date = "2026-04-24"
+compatibility_flags = [ "nodejs_compat" ] 
 
 [observability]
 enabled = false
 head_sampling_rate = 1
-compatibility_flags = [ "nodejs_compat" ] # 如果你的代码未来需要用到 Buffer 等 Node 模块
+
 
 [observability.logs]
 enabled = true
