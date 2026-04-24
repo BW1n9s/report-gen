@@ -1,1 +1,8 @@
 
+name = "lark-report-bot"
+main = "src/index.js"
+compatibility_date = "2026-04-24"
+
+[[kv_namespaces]]
+binding = "REPORT_SESSIONS"
+id = "d68d367f9db54e5f8c5067c3cca0077b"
