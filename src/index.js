@@ -213,3 +213,28 @@ async function sendGuideCard(chatId, token) {
     body: JSON.stringify({ receive_id: chatId, msg_type: "interactive", content: JSON.stringify(content) })
   });
 }
+
+async function getLarkToken(env) {
+  if (!env.LARK_APP_ID || !env.LARK_APP_SECRET) {
+    throw new Error("Missing LARK_APP_ID or LARK_APP_SECRET in Cloudflare Worker environment variables");
+  }
+
+  const res = await fetch("https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json; charset=utf-8"
+    },
+    body: JSON.stringify({
+      app_id: env.LARK_APP_ID,
+      app_secret: env.LARK_APP_SECRET
+    })
+  });
+
+  const data = await res.json();
+
+  if (!res.ok || data.code !== 0) {
+    throw new Error(`Failed to get Lark tenant token: ${JSON.stringify(data)}`);
+  }
+
+  return data.tenant_access_token;
+}
