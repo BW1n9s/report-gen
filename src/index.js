@@ -1,5 +1,5 @@
 /**
- * Lark Report Generator - Stable Version (Session Guarded)
+ * Lark Report Generator - Fixed Card Interaction Version
  */
 
 // =====================
@@ -46,7 +46,7 @@ async function getToken(env) {
   return data.tenant_access_token;
 }
 
-// 发送引导卡片 (当无 Session 时)
+// 发送引导卡片
 async function sendGuideCard(chatId, token) {
   await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
     method: "POST",
@@ -57,7 +57,7 @@ async function sendGuideCard(chatId, token) {
       content: JSON.stringify({
         header: { title: { tag: "plain_text", content: "🔍 未检测到进行中的 Report" } },
         elements: [
-          { tag: "div", text: { tag: "plain_text", content: "目前没有正在进行的会话，请选择要生成的报告类型以开始：" } },
+          { tag: "div", text: { tag: "plain_text", content: "目前没有正在进行的会话，请点击下方按钮开始：" } },
           {
             tag: "action",
             actions: [
@@ -68,6 +68,14 @@ async function sendGuideCard(chatId, token) {
         ]
       })
     })
+  });
+}
+
+async function sendTextMsg(chatId, text, token) {
+  await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ receive_id: chatId, msg_type: "text", content: JSON.stringify({ text }) })
   });
 }
 
@@ -109,23 +117,30 @@ export default {
     if (request.method !== "POST") return new Response("Running");
 
     let body = await request.json();
+    // 1. 解密
     if (body.encrypt) body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
+    
+    // 2. URL 验证
     if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
 
-    const event = body.event;
-    // 处理卡片点击 (card.action.trigger)
-    const isCardAction = body.action && body.action.value;
-    const chatId = event?.message?.chat_id || body.action?.open_chat_id;
+    // 3. 提取核心 ID (兼容事件流和卡片交互流)
+    const isCardAction = !!body.action;
+    const chatId = isCardAction ? body.open_chat_id : body.event?.message?.chat_id;
+    const messageId = body.event?.message?.message_id;
+
+    if (!chatId) return new Response(JSON.stringify({ code: 0 }));
+
     const token = await getToken(env);
 
+    // 使用 waitUntil 异步处理耗时任务
     ctx.waitUntil((async () => {
       try {
-        // 1. 处理开始指令 (文字或卡片点击)
+        // --- A. 处理开始指令 (卡片点击或文字) ---
         let startType = null;
-        if (isCardAction && body.action.value.action === "start") {
+        if (isCardAction && body.action.value?.action === "start") {
           startType = body.action.value.type;
-        } else if (event?.message?.message_type === "text") {
-          const text = JSON.parse(event.message.content).text.toLowerCase();
+        } else if (body.event?.message?.message_type === "text") {
+          const text = JSON.parse(body.event.message.content).text.toLowerCase();
           if (text.includes("start") || text.includes("开始")) startType = "PD";
         }
 
@@ -138,29 +153,25 @@ export default {
             start_at: Date.now()
           }), { expirationTtl: 86400 });
           
-          const msg = `🚀 已开启 ${startType} Report 会话！\n现在您可以发送现场图片或输入备注信息。完成后输入“结束”。`;
-          if (event?.message?.message_id) await reply(event.message.message_id, msg, token);
-          else await fetch(`https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: msg }) })
-          });
+          const msg = `🚀 已开启 ${startType} Report 会话！\n请发送图片或备注信息，完成后输入“结束”。`;
+          await sendTextMsg(chatId, msg, token);
           return;
         }
 
-        // 2. 检查 Session 准入
+        // --- B. 准入检查 ---
         const sessionRaw = await env.REPORT_SESSIONS.get(chatId);
-        if (!sessionRaw && event) {
+        if (!sessionRaw) {
+          // 如果没有 Session 且不是正在尝试“开始”，则发送引导
           await sendGuideCard(chatId, token);
           return;
         }
-        const session = JSON.parse(sessionRaw || "{}");
+        const session = JSON.parse(sessionRaw);
 
-        // 3. 处理结束
-        if (event?.message?.message_type === "text") {
-          const text = JSON.parse(event.message.content).text;
+        // --- C. 处理结束 ---
+        if (body.event?.message?.message_type === "text") {
+          const text = JSON.parse(body.event.message.content).text;
           if (text === "结束" || text === "end") {
-            await reply(event.message.message_id, `✅ Report 已锁定\n类型: ${session.report_type}\n图片: ${session.images?.length || 0}\n备注: ${session.notes?.length || 0}\n(即将生成文档...)`, token);
+            await reply(messageId, `✅ 会话已结束\n记录了 ${session.images?.length || 0} 张图片和 ${session.notes?.length || 0} 条备注。\n(正在清理会话...)`, token);
             await env.REPORT_SESSIONS.delete(chatId);
             return;
           }
@@ -168,13 +179,13 @@ export default {
           session.notes = session.notes || [];
           session.notes.push({ text, ts: Date.now() });
           await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
-          await reply(event.message.message_id, "✍️ 备注已加入 Report", token);
+          await reply(messageId, "✍️ 备注已加入 Report", token);
         }
 
-        // 4. 处理图片
-        if (event?.message?.message_type === "image") {
-          const imageKey = JSON.parse(event.message.content).image_key;
-          const imgRes = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${event.message.message_id}/resources/${imageKey}?type=image`, {
+        // --- D. 处理图片 ---
+        if (body.event?.message?.message_type === "image") {
+          const imageKey = JSON.parse(body.event.message.content).image_key;
+          const imgRes = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${imageKey}?type=image`, {
             headers: { Authorization: `Bearer ${token}` }
           });
           const result = await askGemini(await imgRes.arrayBuffer(), env);
@@ -182,14 +193,15 @@ export default {
           session.images = session.images || [];
           session.images.push({ imageKey, result, ts: Date.now() });
           await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
-          await reply(event.message.message_id, `📸 图片已记录\n识别结果：${result}`, token);
+          await reply(messageId, `📸 图片已记录\n识别结果：${result}`, token);
         }
 
       } catch (e) {
-        console.error("Worker Error:", e.message);
+        console.error("Worker Execution Error:", e.message);
       }
     })());
 
+    // 必须立即返回，否则 Lark 会认为超时
     return new Response(JSON.stringify({ code: 0 }));
   }
 };
