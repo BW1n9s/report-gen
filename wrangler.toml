@@ -6,6 +6,7 @@ compatibility_date = "2026-04-24"
 [observability]
 enabled = false
 head_sampling_rate = 1
+compatibility_flags = [ "nodejs_compat" ] # 如果你的代码未来需要用到 Buffer 等 Node 模块
 
 [observability.logs]
 enabled = true
@@ -18,6 +19,10 @@ enabled = true
 persist = true
 head_sampling_rate = 1
 
-[[kv_namespaces]]
+[kv_namespaces]
 binding = "REPORT_SESSIONS"
 id = "d68d367f9db54e5f8c5067c3cca0077b"
+
+[vars]
+GEMINI_MODEL = "gemini-2.5-flash"  # 明确使用的 AI 模型版本
+LARK_API_URL = "https://open.feishu.cn/open-apis"
