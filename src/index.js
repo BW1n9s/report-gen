@@ -1,207 +1,374 @@
-/**
- * Lark Report Generator - Encrypted Card Action Fix
- */
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      if (request.method !== "POST") {
+        return json({ ok: true, message: "Lark Report Bot is running" });
+      }
 
-// =====================
-// Utils
-// =====================
+      const bodyText = await request.text();
+      console.log("RAW BODY:", bodyText);
 
-function b64ToUint8Array(base64) {
-  return new Uint8Array(atob(base64).split("").map(c => c.charCodeAt(0)));
-}
+      let body;
+      try {
+        body = JSON.parse(bodyText);
+      } catch (e) {
+        console.log("JSON parse error:", e.message);
+        return json({ ok: false, error: "Invalid JSON" }, 400);
+      }
 
-async function decrypt(encrypt, key) {
-  const encryptedBuffer = b64ToUint8Array(encrypt);
-  const iv = encryptedBuffer.slice(0, 16);
-  const data = encryptedBuffer.slice(16);
-  const encoder = new TextEncoder();
-  const keyBuffer = await crypto.subtle.digest("SHA-256", encoder.encode(key));
-  const aesKey = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
-  const decrypted = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, aesKey, data);
-  return JSON.parse(new TextDecoder().decode(decrypted).replace(/[\x00-\x1F\x7F-\x9F]/g, ""));
-}
+      console.log("EVENT TYPE:", body?.header?.event_type || body?.type);
+      console.log("BODY KEYS:", Object.keys(body || {}).join(","));
 
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunkSize = 8192;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    for (let j = 0; j < chunk.length; j++) binary += String.fromCharCode(chunk[j]);
-  }
-  return btoa(binary);
-}
+      // 1. Lark URL verification
+      if (body.type === "url_verification") {
+        console.log("URL verification received");
+        return json({ challenge: body.challenge });
+      }
 
-// =====================
-// Lark API
-// =====================
+      // 2. 新版 Lark event wrapper
+      const eventType = body?.header?.event_type;
+      const event = body?.event || {};
 
-async function getToken(env) {
-  const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ app_id: env.FEISHU_APP_ID, app_secret: env.FEISHU_APP_SECRET })
+      // 3. 收到普通消息：发开始卡片
+      if (eventType === "im.message.receive_v1") {
+        console.log("Message received");
+
+        const openId = event?.sender?.sender_id?.open_id;
+        const chatId = event?.message?.chat_id;
+
+        console.log("openId:", openId);
+        console.log("chatId:", chatId);
+
+        if (!chatId) {
+          console.log("No chat_id found");
+          return json({ ok: true, message: "No chat_id" });
+        }
+
+        const token = await getTenantAccessToken(env);
+
+        await sendStartCard(token, chatId);
+
+        return json({ ok: true, handled: "im.message.receive_v1" });
+      }
+
+      // 4. 卡片按钮点击事件：新版常见类型
+      if (
+        eventType === "card.action.trigger" ||
+        eventType === "card.action.trigger_v1" ||
+        eventType === "im.message.message_card.action_v1"
+      ) {
+        console.log("Card action event received");
+
+        await handleCardAction(env, body);
+
+        return json({ ok: true, handled: eventType });
+      }
+
+      // 5. 有些 Lark 配置里按钮事件结构可能没有标准 event_type
+      // 所以这里做兜底识别
+      if (body?.event?.action || body?.action || body?.event?.operator) {
+        console.log("Fallback card action detected");
+
+        await handleCardAction(env, body);
+
+        return json({ ok: true, handled: "fallback_card_action" });
+      }
+
+      console.log("Unhandled event:", JSON.stringify(body).slice(0, 1000));
+
+      return json({
+        ok: true,
+        message: "Event received but not handled",
+        event_type: eventType || body?.type || null,
+      });
+    } catch (err) {
+      console.log("MAIN ERROR:", err?.stack || err?.message || String(err));
+      return json(
+        {
+          ok: false,
+          error: err?.message || String(err),
+        },
+        500
+      );
+    }
+  },
+};
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+    },
   });
+}
+
+async function getTenantAccessToken(env) {
+  if (!env.LARK_APP_ID) {
+    throw new Error("Missing env.LARK_APP_ID");
+  }
+
+  if (!env.LARK_APP_SECRET) {
+    throw new Error("Missing env.LARK_APP_SECRET");
+  }
+
+  const res = await fetch(
+    "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        app_id: env.LARK_APP_ID,
+        app_secret: env.LARK_APP_SECRET,
+      }),
+    }
+  );
+
   const data = await res.json();
+  console.log("TOKEN RESPONSE:", JSON.stringify(data));
+
+  if (!res.ok || data.code !== 0) {
+    throw new Error("Failed to get tenant_access_token: " + JSON.stringify(data));
+  }
+
   return data.tenant_access_token;
 }
 
-async function sendGuideCard(chatId, token) {
-  await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({
-      receive_id: chatId,
-      msg_type: "interactive",
-      content: JSON.stringify({
-        header: { title: { tag: "plain_text", content: "🔍 未检测到进行中的 Report" } },
-        elements: [
-          { tag: "div", text: { tag: "plain_text", content: "目前没有正在进行的会话，请选择类型开始：" } },
+async function sendStartCard(token, chatId) {
+  const card = {
+    config: {
+      wide_screen_mode: true,
+    },
+    header: {
+      title: {
+        tag: "plain_text",
+        content: "Report Generator",
+      },
+      template: "blue",
+    },
+    elements: [
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content:
+            "请选择要生成的报告类型：\n\n- **PD Report**：适合 Pre-delivery / 新车检查\n- **Service Report**：适合维修、保养、故障检查",
+        },
+      },
+      {
+        tag: "hr",
+      },
+      {
+        tag: "action",
+        actions: [
           {
-            tag: "action",
-            actions: [
-              { tag: "button", text: { tag: "plain_text", content: "PD Report" }, type: "primary", value: { type: "PD", action: "start" } },
-              { tag: "button", text: { tag: "plain_text", content: "Service Report" }, type: "default", value: { type: "Service", action: "start" } }
-            ]
-          }
-        ]
-      })
-    })
-  });
-}
+            tag: "button",
+            text: {
+              tag: "plain_text",
+              content: "Start PD Report",
+            },
+            type: "primary",
+            value: {
+              action: "start_pd_report",
+              report_type: "PD",
+            },
+          },
+          {
+            tag: "button",
+            text: {
+              tag: "plain_text",
+              content: "Start Service Report",
+            },
+            type: "default",
+            value: {
+              action: "start_service_report",
+              report_type: "SERVICE",
+            },
+          },
+        ],
+      },
+    ],
+  };
 
-async function sendTextMsg(chatId, text, token) {
-  await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ receive_id: chatId, msg_type: "text", content: JSON.stringify({ text }) })
-  });
-}
-
-// =====================
-// Gemini
-// =====================
-
-async function askGemini(imageBuffer, env) {
-  const model = env.GEMINI_MODEL || "gemini-2.0-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
-  const base64Image = arrayBufferToBase64(imageBuffer);
-  const prompt = "识别这张工程机械图片，返回 Model/Serial/VIN 或 Hours，简洁返回。";
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: base64Image } }] }]
-    })
-  });
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text || "识别失败";
-}
-
-// =====================
-// Worker
-// =====================
-
-export default {
-  async fetch(request, env, ctx) {
-    if (request.method !== "POST") return new Response("OK");
-
-    let body = await request.json();
-
-    // 1. 立即解密（如果是加密消息）
-    if (body.encrypt) {
-      try {
-        body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
-      } catch (e) {
-        return new Response("Decrypt Failed", { status: 500 });
-      }
+  const res = await fetch(
+    "https://open.larksuite.com/open-apis/im/v1/messages?receive_id_type=chat_id",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        receive_id: chatId,
+        msg_type: "interactive",
+        content: JSON.stringify(card),
+      }),
     }
+  );
 
-    // 2. URL 验证
-    if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
+  const data = await res.json();
+  console.log("SEND START CARD RESPONSE:", JSON.stringify(data));
 
-    // 3. 提取核心 ID (解密后提取)
-    const isCardAction = !!body.action;
-    const chatId = isCardAction ? body.open_chat_id : body.event?.message?.chat_id;
-    const messageId = body.event?.message?.message_id;
-
-    if (!chatId) return new Response(JSON.stringify({ code: 0 }));
-
-    const token = await getToken(env);
-
-    ctx.waitUntil((async () => {
-      try {
-        // --- 处理开始逻辑 ---
-        let startType = null;
-        if (isCardAction && body.action.value?.action === "start") {
-          startType = body.action.value.type;
-        } else if (body.event?.message?.message_type === "text") {
-          const content = JSON.parse(body.event.message.content);
-          const text = content.text.toLowerCase();
-          if (text.includes("start") || text.includes("开始")) startType = "PD";
-        }
-
-        if (startType) {
-          await env.REPORT_SESSIONS.put(chatId, JSON.stringify({
-            report_type: startType,
-            status: "collecting",
-            images: [],
-            notes: [],
-            start_at: Date.now()
-          }), { expirationTtl: 86400 });
-          
-          await sendTextMsg(chatId, `🚀 已开启 ${startType} 会话！\n请发送图片或备注，完成后输入“结束”。`, token);
-          return;
-        }
-
-        // --- 准入与 Session 逻辑 ---
-        const sessionRaw = await env.REPORT_SESSIONS.get(chatId);
-        if (!sessionRaw) {
-          await sendGuideCard(chatId, token);
-          return;
-        }
-        const session = JSON.parse(sessionRaw);
-
-        // 文字处理 (备注/结束)
-        if (body.event?.message?.message_type === "text") {
-          const text = JSON.parse(body.event.message.content).text;
-          if (text === "结束" || text === "end") {
-            await sendTextMsg(chatId, `✅ 结束！记录了 ${session.images?.length} 图, ${session.notes?.length} 备注。`, token);
-            await env.REPORT_SESSIONS.delete(chatId);
-            return;
-          }
-          session.notes = session.notes || [];
-          session.notes.push({ text, ts: Date.now() });
-          await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
-          await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ msg_type: "text", content: JSON.stringify({ text: "✍️ 已记录" }) })
-          });
-        }
-
-        // 图片处理
-        if (body.event?.message?.message_type === "image") {
-          const imageKey = JSON.parse(body.event.message.content).image_key;
-          const imgRes = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${imageKey}?type=image`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          const result = await askGemini(await imgRes.arrayBuffer(), env);
-          session.images = session.images || [];
-          session.images.push({ imageKey, result, ts: Date.now() });
-          await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
-          await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/reply`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ msg_type: "text", content: JSON.stringify({ text: `📸 已记录\n识别：${result}` }) })
-          });
-        }
-      } catch (e) {
-        console.error("ERR:", e.message);
-      }
-    })());
-
-    return new Response(JSON.stringify({ code: 0 }));
+  if (!res.ok || data.code !== 0) {
+    throw new Error("Failed to send start card: " + JSON.stringify(data));
   }
-};
+
+  return data;
+}
+
+async function handleCardAction(env, body) {
+  console.log("HANDLE CARD ACTION BODY:", JSON.stringify(body).slice(0, 3000));
+
+  const token = await getTenantAccessToken(env);
+
+  const event = body?.event || {};
+
+  const actionObj =
+    event?.action ||
+    body?.action ||
+    event?.card?.action ||
+    body?.card?.action ||
+    {};
+
+  const value =
+    actionObj?.value ||
+    actionObj?.option ||
+    actionObj ||
+    {};
+
+  const action =
+    value?.action ||
+    value?.key ||
+    actionObj?.trigger_key ||
+    actionObj?.name ||
+    body?.action ||
+    "";
+
+  const reportType =
+    value?.report_type ||
+    value?.reportType ||
+    "";
+
+  const openId =
+    event?.operator?.operator_id?.open_id ||
+    event?.operator?.open_id ||
+    event?.sender?.sender_id?.open_id ||
+    body?.operator?.operator_id?.open_id ||
+    body?.operator?.open_id ||
+    "";
+
+  const chatId =
+    event?.context?.open_chat_id ||
+    event?.context?.chat_id ||
+    event?.open_chat_id ||
+    event?.message?.chat_id ||
+    body?.open_chat_id ||
+    body?.chat_id ||
+    "";
+
+  console.log("Parsed action:", action);
+  console.log("Parsed reportType:", reportType);
+  console.log("Parsed openId:", openId);
+  console.log("Parsed chatId:", chatId);
+
+  let selectedType = "";
+
+  if (action === "start_pd_report" || reportType === "PD") {
+    selectedType = "PD";
+  }
+
+  if (action === "start_service_report" || reportType === "SERVICE") {
+    selectedType = "SERVICE";
+  }
+
+  if (!selectedType) {
+    console.log("Unknown button action");
+    if (openId) {
+      await sendTextToUser(token, openId, "收到按钮点击，但没有识别出报告类型。请检查 button value。");
+    }
+    return;
+  }
+
+  const displayName =
+    selectedType === "PD" ? "PD Report" : "Service Report";
+
+  // 这里先用文字确认按钮逻辑已经通了
+  // 后面再接图片识别、状态存储、生成 Lark Doc
+  const message =
+    `已选择：${displayName}\n\n` +
+    `请继续在聊天里发送车辆图片。\n` +
+    `可以发送：铭牌、仪表、整车、轮胎、电池、液压部件、损坏部件等。\n\n` +
+    `发送完成后，之后可以再加一个“生成报告”按钮或文字指令来生成文档。`;
+
+  if (openId) {
+    await sendTextToUser(token, openId, message);
+  } else if (chatId) {
+    await sendTextToChat(token, chatId, message);
+  } else {
+    console.log("No openId or chatId available, cannot reply.");
+  }
+}
+
+async function sendTextToUser(token, openId, text) {
+  console.log("sendTextToUser:", openId, text);
+
+  const res = await fetch(
+    "https://open.larksuite.com/open-apis/im/v1/messages?receive_id_type=open_id",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        receive_id: openId,
+        msg_type: "text",
+        content: JSON.stringify({
+          text,
+        }),
+      }),
+    }
+  );
+
+  const data = await res.json();
+  console.log("SEND TEXT USER RESPONSE:", JSON.stringify(data));
+
+  if (!res.ok || data.code !== 0) {
+    throw new Error("Failed to send text to user: " + JSON.stringify(data));
+  }
+
+  return data;
+}
+
+async function sendTextToChat(token, chatId, text) {
+  console.log("sendTextToChat:", chatId, text);
+
+  const res = await fetch(
+    "https://open.larksuite.com/open-apis/im/v1/messages?receive_id_type=chat_id",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        receive_id: chatId,
+        msg_type: "text",
+        content: JSON.stringify({
+          text,
+        }),
+      }),
+    }
+  );
+
+  const data = await res.json();
+  console.log("SEND TEXT CHAT RESPONSE:", JSON.stringify(data));
+
+  if (!res.ok || data.code !== 0) {
+    throw new Error("Failed to send text to chat: " + JSON.stringify(data));
+  }
+
+  return data;
+}
