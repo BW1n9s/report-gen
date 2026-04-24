@@ -1,5 +1,5 @@
 /**
- * Lark Report Generator - Debug Version
+ * Lark Report Generator - Card Action ID Fix
  */
 
 // =====================
@@ -47,7 +47,6 @@ async function getToken(env) {
 }
 
 async function sendGuideCard(chatId, token) {
-  console.log(`[Action] Sending Guide Card to ChatID: ${chatId}`);
   await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -88,7 +87,6 @@ async function askGemini(imageBuffer, env) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
   const base64Image = arrayBufferToBase64(imageBuffer);
   const prompt = "识别这张工程机械图片，返回 Model/Serial/VIN 或 Hours，简洁返回。";
-
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -114,27 +112,28 @@ export default {
     if (body.encrypt) {
       try {
         body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
-        console.log("[Debug] Decrypted Body:", JSON.stringify(body));
       } catch (e) {
-        console.error("[Error] Decrypt Failed:", e.message);
         return new Response("Decrypt Failed", { status: 500 });
       }
-    } else {
-      console.log("[Debug] Raw Body:", JSON.stringify(body));
     }
 
     // 2. URL 验证
     if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
 
-    // 3. 提取核心 ID
+    // 3. ⭐ 核心修复：多路径提取 ChatID
+    // 路径 A: 卡片交互 (Card Action 2.0)
+    // 路径 B: 传统事件 (Event)
     const isCardAction = !!body.action;
-    const chatId = isCardAction ? body.open_chat_id : body.event?.message?.chat_id;
+    const chatId = isCardAction 
+      ? (body.context?.open_chat_id || body.open_chat_id) 
+      : body.event?.message?.chat_id;
+    
     const messageId = body.event?.message?.message_id;
 
     console.log(`[Debug] isCardAction: ${isCardAction}, ChatID: ${chatId}`);
 
     if (!chatId) {
-      console.warn("[Warn] No ChatID found in request");
+      console.warn("[Warn] No ChatID found in request body");
       return new Response(JSON.stringify({ code: 0 }));
     }
 
@@ -142,11 +141,9 @@ export default {
 
     ctx.waitUntil((async () => {
       try {
-        // --- 逻辑 A: 处理开始 (卡片点击) ---
+        // --- 处理开始逻辑 ---
         if (isCardAction && body.action.value?.action === "start") {
           const startType = body.action.value.type;
-          console.log(`[Action] Starting Session: ${startType} for ChatID: ${chatId}`);
-          
           await env.REPORT_SESSIONS.put(chatId, JSON.stringify({
             report_type: startType,
             status: "collecting",
@@ -159,40 +156,22 @@ export default {
           return;
         }
 
-        // --- 逻辑 B: 处理文字指令 (开始/结束/备注) ---
+        // --- 准入检查 ---
+        const sessionRaw = await env.REPORT_SESSIONS.get(chatId);
+        if (!sessionRaw) {
+          await sendGuideCard(chatId, token);
+          return;
+        }
+        const session = JSON.parse(sessionRaw);
+
+        // 文字处理 (备注/结束)
         if (body.event?.message?.message_type === "text") {
           const text = JSON.parse(body.event.message.content).text;
-          console.log(`[Debug] Received Text: "${text}" from ChatID: ${chatId}`);
-
-          if (text.toLowerCase().includes("开始")) {
-             // 允许通过文字触发 PD Report
-             await env.REPORT_SESSIONS.put(chatId, JSON.stringify({
-              report_type: "PD",
-              status: "collecting",
-              images: [],
-              notes: [],
-              start_at: Date.now()
-            }), { expirationTtl: 86400 });
-            await sendTextMsg(chatId, `🚀 已开启 PD Report 会话！\n请发送图片或备注，完成后输入“结束”。`, token);
-            return;
-          }
-
-          // 准入检查
-          const sessionRaw = await env.REPORT_SESSIONS.get(chatId);
-          if (!sessionRaw) {
-            console.log(`[Info] No Session for ChatID ${chatId}, sending guide.`);
-            await sendGuideCard(chatId, token);
-            return;
-          }
-          const session = JSON.parse(sessionRaw);
-
           if (text === "结束" || text === "end") {
-            await sendTextMsg(chatId, `✅ 结束！记录了 ${session.images?.length} 图, ${session.notes?.length} 备注。`, token);
+            await sendTextMsg(chatId, `✅ 结束！记录了 ${session.images?.length || 0} 图, ${session.notes?.length || 0} 备注。`, token);
             await env.REPORT_SESSIONS.delete(chatId);
             return;
           }
-
-          // 记录备注
           session.notes = session.notes || [];
           session.notes.push({ text, ts: Date.now() });
           await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
@@ -203,22 +182,13 @@ export default {
           });
         }
 
-        // --- 逻辑 C: 处理图片 ---
+        // 图片处理
         if (body.event?.message?.message_type === "image") {
-          const sessionRaw = await env.REPORT_SESSIONS.get(chatId);
-          if (!sessionRaw) {
-            await sendGuideCard(chatId, token);
-            return;
-          }
-          const session = JSON.parse(sessionRaw);
-
-          console.log(`[Action] Processing Image for ChatID: ${chatId}`);
           const imageKey = JSON.parse(body.event.message.content).image_key;
           const imgRes = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${imageKey}?type=image`, {
             headers: { Authorization: `Bearer ${token}` }
           });
           const result = await askGemini(await imgRes.arrayBuffer(), env);
-          
           session.images = session.images || [];
           session.images.push({ imageKey, result, ts: Date.now() });
           await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session));
@@ -229,7 +199,7 @@ export default {
           });
         }
       } catch (e) {
-        console.error("[Error] Runtime Exception:", e.stack);
+        console.error("Worker Error:", e.message);
       }
     })());
 
