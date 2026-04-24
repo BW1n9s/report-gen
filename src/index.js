@@ -1,5 +1,5 @@
 /**
- * Lark Report Generator - Absolute ID Recovery Version
+ * Lark Report Generator - Multi-path ID Recovery (Final)
  */
 
 // =====================
@@ -47,7 +47,6 @@ async function getToken(env) {
 }
 
 async function sendGuideCard(chatId, token) {
-  console.log(`[Action] Sending Guide Card to: ${chatId}`);
   await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -109,7 +108,6 @@ export default {
 
     let body = await request.json();
 
-    // 1. 解密
     if (body.encrypt) {
       try {
         body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
@@ -118,22 +116,23 @@ export default {
       }
     }
 
-    // 2. URL 验证
     if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
 
-    // 3. ⭐ 多层级 ID 提取 (针对 Card Action 2.0 优化)
-    // 根据你的日志，卡片点击包包含 schema: "2.0"
-    const isCardAction = !!body.action || body.schema === "2.0";
-    
-    // 优先级排序：context.open_chat_id -> open_chat_id -> event.message.chat_id
-    const chatId = body.context?.open_chat_id || body.open_chat_id || body.event?.message?.chat_id;
+    // ⭐ 最终极的 ID 搜寻路径 (按优先级排序)
+    const chatId = 
+      body.action?.open_chat_id || 
+      body.open_chat_id || 
+      body.context?.open_chat_id || 
+      body.action?.context?.open_chat_id || 
+      body.event?.message?.chat_id;
+
+    const isCardAction = !!(body.action || body.schema === "2.0");
     const messageId = body.event?.message?.message_id;
 
-    console.log(`[Debug] isCard=${isCardAction}, ChatID=${chatId}, schema=${body.schema || 'none'}`);
+    console.log(`[Debug] isCard=${isCardAction}, ChatID=${chatId}`);
 
     if (!chatId) {
-      // 如果依然没拿到 ID，打印整个 Body 方便进一步诊断
-      console.log("[Critical] Missing ChatID. Body Structure:", JSON.stringify(body));
+      console.log("[Critical] ID still missing. Full Body:", JSON.stringify(body));
       return new Response(JSON.stringify({ code: 0 }));
     }
 
@@ -141,10 +140,13 @@ export default {
 
     ctx.waitUntil((async () => {
       try {
-        // --- 处理卡片点击逻辑 ---
-        if (isCardAction && body.action?.value?.action === "start") {
-          const startType = body.action.value.type;
-          console.log(`[Flow] Initializing session for ${chatId} type: ${startType}`);
+        // --- 逻辑 1: 处理卡片按钮点击 ---
+        // 兼容 body.action.value 或直接 body.action (取决于飞书协议版本)
+        const actionValue = body.action?.value || body.action;
+        
+        if (isCardAction && actionValue?.action === "start") {
+          const startType = actionValue.type;
+          console.log(`[Flow] Initializing ${startType} session for ${chatId}`);
           
           await env.REPORT_SESSIONS.put(chatId, JSON.stringify({
             report_type: startType,
@@ -154,20 +156,19 @@ export default {
             start_at: Date.now()
           }), { expirationTtl: 86400 });
           
-          await sendTextMsg(chatId, `🚀 已开启 ${startType} 会话！\n请发送图片或备注，完成后输入“结束”。`, token);
+          await sendTextMsg(chatId, `🚀 已开启 ${startType} Report 会话！\n请发送图片或备注，完成后输入“结束”。`, token);
           return;
         }
 
-        // --- 准入检查 ---
+        // --- 逻辑 2: 准入与业务流程 ---
         const sessionRaw = await env.REPORT_SESSIONS.get(chatId);
         if (!sessionRaw) {
-          // 如果不是开始操作且无 Session，发送引导
           await sendGuideCard(chatId, token);
           return;
         }
         const session = JSON.parse(sessionRaw);
 
-        // --- 处理文字消息 ---
+        // 文字处理
         if (body.event?.message?.message_type === "text") {
           const text = JSON.parse(body.event.message.content).text;
           if (text === "结束" || text === "end") {
@@ -185,7 +186,7 @@ export default {
           });
         }
 
-        // --- 处理图片消息 ---
+        // 图片处理
         if (body.event?.message?.message_type === "image") {
           const imageKey = JSON.parse(body.event.message.content).image_key;
           const imgRes = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${imageKey}?type=image`, {
