@@ -1,5 +1,5 @@
 /**
- * Lark Report Generator - Card Action ID Fix
+ * Lark Report Generator - Absolute ID Recovery Version
  */
 
 // =====================
@@ -47,6 +47,7 @@ async function getToken(env) {
 }
 
 async function sendGuideCard(chatId, token) {
+  console.log(`[Action] Sending Guide Card to: ${chatId}`);
   await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -56,7 +57,7 @@ async function sendGuideCard(chatId, token) {
       content: JSON.stringify({
         header: { title: { tag: "plain_text", content: "🔍 未检测到进行中的 Report" } },
         elements: [
-          { tag: "div", text: { tag: "plain_text", content: "目前没有正在进行的会话，请选择类型开始：" } },
+          { tag: "div", text: { tag: "plain_text", content: "目前没有正在进行的会话，请点击按钮开始：" } },
           {
             tag: "action",
             actions: [
@@ -79,7 +80,7 @@ async function sendTextMsg(chatId, text, token) {
 }
 
 // =====================
-// Gemini
+// Gemini AI
 // =====================
 
 async function askGemini(imageBuffer, env) {
@@ -120,20 +121,19 @@ export default {
     // 2. URL 验证
     if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
 
-    // 3. ⭐ 核心修复：多路径提取 ChatID
-    // 路径 A: 卡片交互 (Card Action 2.0)
-    // 路径 B: 传统事件 (Event)
-    const isCardAction = !!body.action;
-    const chatId = isCardAction 
-      ? (body.context?.open_chat_id || body.open_chat_id) 
-      : body.event?.message?.chat_id;
+    // 3. ⭐ 多层级 ID 提取 (针对 Card Action 2.0 优化)
+    // 根据你的日志，卡片点击包包含 schema: "2.0"
+    const isCardAction = !!body.action || body.schema === "2.0";
     
+    // 优先级排序：context.open_chat_id -> open_chat_id -> event.message.chat_id
+    const chatId = body.context?.open_chat_id || body.open_chat_id || body.event?.message?.chat_id;
     const messageId = body.event?.message?.message_id;
 
-    console.log(`[Debug] isCardAction: ${isCardAction}, ChatID: ${chatId}`);
+    console.log(`[Debug] isCard=${isCardAction}, ChatID=${chatId}, schema=${body.schema || 'none'}`);
 
     if (!chatId) {
-      console.warn("[Warn] No ChatID found in request body");
+      // 如果依然没拿到 ID，打印整个 Body 方便进一步诊断
+      console.log("[Critical] Missing ChatID. Body Structure:", JSON.stringify(body));
       return new Response(JSON.stringify({ code: 0 }));
     }
 
@@ -141,9 +141,11 @@ export default {
 
     ctx.waitUntil((async () => {
       try {
-        // --- 处理开始逻辑 ---
-        if (isCardAction && body.action.value?.action === "start") {
+        // --- 处理卡片点击逻辑 ---
+        if (isCardAction && body.action?.value?.action === "start") {
           const startType = body.action.value.type;
+          console.log(`[Flow] Initializing session for ${chatId} type: ${startType}`);
+          
           await env.REPORT_SESSIONS.put(chatId, JSON.stringify({
             report_type: startType,
             status: "collecting",
@@ -159,16 +161,17 @@ export default {
         // --- 准入检查 ---
         const sessionRaw = await env.REPORT_SESSIONS.get(chatId);
         if (!sessionRaw) {
+          // 如果不是开始操作且无 Session，发送引导
           await sendGuideCard(chatId, token);
           return;
         }
         const session = JSON.parse(sessionRaw);
 
-        // 文字处理 (备注/结束)
+        // --- 处理文字消息 ---
         if (body.event?.message?.message_type === "text") {
           const text = JSON.parse(body.event.message.content).text;
           if (text === "结束" || text === "end") {
-            await sendTextMsg(chatId, `✅ 结束！记录了 ${session.images?.length || 0} 图, ${session.notes?.length || 0} 备注。`, token);
+            await sendTextMsg(chatId, `✅ 结束！已记录 ${session.images?.length || 0} 图。`, token);
             await env.REPORT_SESSIONS.delete(chatId);
             return;
           }
@@ -182,7 +185,7 @@ export default {
           });
         }
 
-        // 图片处理
+        // --- 处理图片消息 ---
         if (body.event?.message?.message_type === "image") {
           const imageKey = JSON.parse(body.event.message.content).image_key;
           const imgRes = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${imageKey}?type=image`, {
@@ -199,7 +202,7 @@ export default {
           });
         }
       } catch (e) {
-        console.error("Worker Error:", e.message);
+        console.error("Runtime Error:", e.message);
       }
     })());
 
