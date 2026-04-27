@@ -2,7 +2,19 @@ import { decrypt } from './utils.js';
 import { getSession, saveSession, deleteSession } from './session.js';
 import { getLarkToken, sendLarkMessage, sendGuideCard, sendConflictCard } from './lark.js';
 
-// 提取消息文本的辅助函数
+// 优化：提取 ChatID 的逻辑，兼容卡片上下文
+function extractChatId(body) {
+  const event = body?.event || {};
+  // 优先取卡片上下文的 chat_id，其次取消息的 chat_id
+  return event?.context?.open_chat_id || event?.message?.chat_id || event?.chat_id || null;
+}
+
+// 优化：提取 ActionValue
+function extractActionValue(body) {
+  return body?.event?.action?.value || null;
+}
+
+// 提取文本
 function extractTextMessage(event) {
   if (!event?.message || event.message.message_type !== 'text') return null;
   try {
@@ -18,72 +30,60 @@ export default {
     let body;
     try {
       const raw = await request.json();
-      if (raw.encrypt) {
-        body = await decrypt(raw.encrypt, env.FEISHU_ENCRYPT_KEY);
-      } else {
-        body = raw;
-      }
-      // 记录收到的所有内容，方便在 Cloudflare Logs 查看
-      console.log("📥 [Log] 收到请求体:", JSON.stringify(body));
-    } catch (e) {
-      console.error("❌ [Log] 解析失败:", e);
-      return new Response('OK');
-    }
+      body = raw.encrypt ? await decrypt(raw.encrypt, env.FEISHU_ENCRYPT_KEY) : raw;
+    } catch (e) { return new Response('OK'); }
 
-    if (body.type === 'url_verification') {
-      return new Response(JSON.stringify({ challenge: body.challenge }));
-    }
+    if (body.type === 'url_verification') return new Response(JSON.stringify({ challenge: body.challenge }));
 
     const event = body.event;
-    const chatId = event?.message?.chat_id || event?.chat_id || null;
-    const messageId = event?.message?.message_id;
-    const text = extractTextMessage(event);
-
+    const chatId = extractChatId(body);
+    const eventType = body.header?.event_type; // 获取事件类型
+    
     if (!chatId) return new Response('OK');
     const token = await getLarkToken(env);
 
-    console.log(`🆔 ChatID: ${chatId}, 💬 识别文本: "${text}"`);
+    console.log(`🆔 ChatID: ${chatId}, ⚡ EventType: ${eventType}`);
 
-    // 1. 处理结束命令 (不依赖 Session 状态)
+    // 1. 处理卡片点击逻辑 (start 动作)
+    if (eventType === 'card.action.trigger') {
+      const action = extractActionValue(body);
+      if (action?.action === 'start') {
+        const type = action.type;
+        const existing = await getSession(chatId, env);
+        if (existing) {
+          await sendConflictCard(chatId, token, existing.report_type);
+        } else {
+          const newSession = { report_type: type, status: 'collecting', images: [], notes: [], extracted: {} };
+          await saveSession(chatId, newSession, env);
+          await sendLarkMessage(chatId, { text: `✅ 已进入 ${type} 模式，请发送内容。` }, token);
+        }
+      }
+      return new Response(JSON.stringify({ code: 0 }));
+    }
+
+    // 2. 处理普通文本消息
+    const text = extractTextMessage(event);
+    const messageId = event?.message?.message_id;
+
+    // 结束指令
     if (text === '结束' || text?.toLowerCase() === 'end') {
       const session = await getSession(chatId, env);
       if (session) {
         await deleteSession(chatId, env);
         await sendLarkMessage(chatId, { text: `✅ 会话已结束。` }, token);
       } else {
-        await sendLarkMessage(chatId, { text: '⚠️ 当前没有进行中的会话。' }, token);
+        await sendLarkMessage(chatId, { text: '⚠️ 无正在进行的会话。' }, token);
       }
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 2. 检查是否有 Session
+    // 3. 处理会话内逻辑
     let session = await getSession(chatId, env);
-
-    // 3. 处理“启动会话”逻辑 (通过文本匹配按钮文字)
-    // 假设你的按钮发送的文字就是 "PD" 或 "Service"
-    if (!session && (text === 'PD' || text === 'Service')) {
-      console.log(`⚡ [Log] 触发启动: ${text}`);
-      const newSession = { 
-        report_type: text, 
-        status: 'collecting', 
-        images: [], 
-        notes: [], 
-        extracted: {} 
-      };
-      await saveSession(chatId, newSession, env);
-      await sendLarkMessage(chatId, { text: `✅ 已进入 ${text} 模式，请开始发送内容。` }, token);
-      return new Response(JSON.stringify({ code: 0 }));
-    }
-
-    // 4. 未进入 Session 时的引导
     if (!session) {
-      console.log("🧐 [Log] 未在 Session 中，发送引导卡片");
-      await sendGuideCard(chatId, token);
+      if (event?.message) await sendGuideCard(chatId, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 5. 会话内消息处理
-    console.log("📝 [Log] 处理会话内容...");
     if (event?.message?.message_type === 'image') {
       await sendLarkMessage(chatId, { text: '📸 图片已收到。' }, token, 'text', messageId);
     } else if (text) {
