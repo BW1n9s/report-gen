@@ -1,4 +1,3 @@
-// src/index.js
 import { decrypt } from './utils.js';
 import { getSession, saveSession, deleteSession } from './session.js';
 import { getLarkToken, sendLarkMessage, sendGuideCard } from './lark.js';
@@ -14,16 +13,24 @@ export default {
         body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
       }
     } catch (e) {
-      return new Response(JSON.stringify({ code: 1, msg: e.message }));
+      console.error("[Fatal] Decrypt/Parse Error:", e.message);
+      return new Response(JSON.stringify({ code: 1, msg: "decryption_failed" }));
     }
 
-    // 飞书 URL 验证
     if (body.type === "url_verification") {
       return new Response(JSON.stringify({ challenge: body.challenge }));
     }
 
-    const chatId = body.event?.message?.chat_id || body.event?.context?.open_chat_id || body.open_chat_id;
-    if (!chatId) return new Response("OK");
+    // 统一提取 ID
+    const chatId = body.event?.message?.chat_id || 
+                   body.event?.context?.open_chat_id || 
+                   body.action?.open_chat_id || 
+                   body.open_chat_id;
+
+    if (!chatId) {
+      console.warn("[Warn] No ChatID found in request body");
+      return new Response("OK");
+    }
 
     ctx.waitUntil((async () => {
       try {
@@ -32,6 +39,7 @@ export default {
 
         // 1. 处理开始动作
         if (action?.value?.action === "start") {
+          console.log(`[Action] Starting ${action.value.type} for ${chatId}`);
           const newSession = {
             report_type: action.value.type,
             status: "collecting",
@@ -44,33 +52,46 @@ export default {
           return;
         }
 
-        // 2. 检查 Session
+        // 2. 检查 Session 状态
         let session = await getSession(chatId, env);
         if (!session) {
           if (body.event?.message) {
+            console.log("[Info] No session, sending guide card");
             await sendGuideCard(chatId, token);
           }
           return;
         }
 
-        // 3. 处理消息
+        // 3. 处理消息内容
         if (body.event?.message) {
           const msg = body.event.message;
+          
+          // 处理文本
           if (msg.message_type === "text") {
             const text = JSON.parse(msg.content).text.trim();
             if (text === "结束" || text === "end") {
-              await sendLarkMessage(chatId, { text: "🏁 正在生成报告文档..." }, token);
+              console.log("[Action] Finishing session for", chatId);
+              await sendLarkMessage(chatId, { text: "🏁 正在汇总信息，准备生成报告文档..." }, token);
+              // TODO: 此处后续接入生成 Lark Doc 的逻辑
               await deleteSession(chatId, env);
+              await sendLarkMessage(chatId, { text: "✅ 报告已生成（模拟），会话已关闭。" }, token);
             } else {
               session.notes.push({ text, ts: Date.now() });
               await saveSession(chatId, session, env);
               await sendLarkMessage(chatId, { text: "✍️ 已记录备注" }, token);
             }
           }
-          // 图片处理逻辑待续...
+          
+          // 处理图片（防止报错导致异常结束）
+          if (msg.message_type === "image") {
+            console.log("[Action] Image received, starting AI analysis...");
+            await sendLarkMessage(chatId, { text: "🔍 收到图片，正在尝试识别信息..." }, token);
+            // 这里后续调用 ai.js
+          }
         }
       } catch (err) {
-        console.error("Worker Error:", err);
+        // 捕获异步链路中的所有错误并打印
+        console.error("[Critical Error in waitUntil]:", err.stack);
       }
     })());
 
