@@ -11,7 +11,7 @@ export async function getLarkToken(env) {
   return data.tenant_access_token;
 }
 
-// 增加了 replyId 参数支持
+// 修正：确保 reply_message_id 参数正确传入 body
 export async function sendLarkMessage(chatId, content, token, msgType = "text", replyId = null) {
   const body = {
     receive_id: chatId,

@@ -32,7 +32,7 @@ export default {
     if (menuKey === "start_pd") actionValue = { action: "start", type: "PD" };
     if (menuKey === "start_service") actionValue = { action: "start", type: "Service" };
 
-    // 2. 处理“结束”逻辑 (支持菜单点击)
+    // 2. 处理“结束”逻辑
     if (menuKey === "end") {
       await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
       await deleteSession(chatId, env);
@@ -82,7 +82,6 @@ export default {
       const msg = event.message;
       if (msg.message_type === "text") {
         const text = JSON.parse(msg.content).text.trim();
-        // 文字输入的结束逻辑
         if (text === "结束" || text === "end") {
           await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
           await deleteSession(chatId, env);
@@ -90,8 +89,8 @@ export default {
         } else {
           session.notes.push({ text, ts: Date.now() });
           await saveSession(chatId, session, env);
-          // 引用原文回复: 传入 msg.message_id
-          await sendLarkMessage(chatId, { text: "✍️ 备注已记录" }, token, "text", msg.message_id);
+          // 关键修改：直接引用 msg.message_id 进行回复，并显示原文
+          await sendLarkMessage(chatId, { text: `✍️ 备注已记录: "${text}"` }, token, "text", msg.message_id);
         }
       }
     }
