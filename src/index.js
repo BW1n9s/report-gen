@@ -2,6 +2,9 @@ import { decrypt } from './utils.js';
 import { getSession, saveSession, deleteSession } from './session.js';
 import { getLarkToken, sendLarkMessage, replyLarkMessage, sendGuideCard, sendConflictCard } from './lark.js';
 
+// Re-export the Durable Object class — Wrangler requires it from the main entry point
+export { SessionDO } from './session-do.js';
+
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -101,6 +104,16 @@ export default {
 
       if (body?.verification) {
         return jsonResponse({ challenge: body.verification });
+      }
+
+      // Deduplicate — Feishu retries if we don't respond within ~5s.
+      // Use KV (best-effort) to drop duplicate event deliveries.
+      const eventId = body?.header?.event_id;
+      if (eventId) {
+        const dedupKey = `dedup:${eventId}`;
+        const seen = await env.REPORT_SESSIONS.get(dedupKey);
+        if (seen) return jsonResponse({ code: 0 });
+        await env.REPORT_SESSIONS.put(dedupKey, '1', { expirationTtl: 60 });
       }
 
       const event = body?.event || {};
