@@ -81,11 +81,7 @@ export default {
         return new Response(JSON.stringify({ code: 0 }));
       }
 
-      try {
-        await env.REPORT_SESSIONS.put(lockKey, '1', { expirationTtl: 60 });
-      } catch (e) {
-        // KV lock 失败不应阻断启动流程
-      }
+      await env.REPORT_SESSIONS.put(lockKey, '1', { expirationTtl: 60 });
       const newSession = {
         report_type: actionValue.type || 'PD',
         status: 'collecting',
