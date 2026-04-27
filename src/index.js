@@ -1,54 +1,76 @@
 // src/index.js
 import { decrypt } from './utils.js';
-import { getSession, saveSession, initSession } from './session.js';
-import { getLarkToken, sendLarkMessage } from './lark.js';
+import { getSession, saveSession, deleteSession } from './session.js';
+import { getLarkToken, sendLarkMessage, sendGuideCard } from './lark.js';
 
 export default {
   async fetch(request, env, ctx) {
-    if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+    if (request.method !== "POST") return new Response("OK");
 
-    let body = await request.json();
-    if (body.encrypt) {
-      body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
+    let body;
+    try {
+      body = await request.json();
+      if (body.encrypt) {
+        body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
+      }
+    } catch (e) {
+      return new Response(JSON.stringify({ code: 1, msg: e.message }));
     }
 
-    if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
+    // 飞书 URL 验证
+    if (body.type === "url_verification") {
+      return new Response(JSON.stringify({ challenge: body.challenge }));
+    }
 
-    const chatId = body.event?.message?.chat_id || body.event?.context?.open_chat_id;
+    const chatId = body.event?.message?.chat_id || body.event?.context?.open_chat_id || body.open_chat_id;
     if (!chatId) return new Response("OK");
 
-    const token = await getLarkToken(env);
-
     ctx.waitUntil((async () => {
-      // 1. 处理开始指令 (卡片点击)
-      const action = body.event?.action || body.action;
-      if (action?.value?.action === "start") {
-        await initSession(chatId, action.value.type, env);
-        await sendLarkMessage(chatId, { text: `✅ ${action.value.type} 已开启！\n请发送图片或备注。` }, token);
-        return;
-      }
+      try {
+        const token = await getLarkToken(env);
+        const action = body.event?.action || body.action;
 
-      // 2. 检查 Session 状态
-      let session = await getSession(chatId, env);
-      if (!session) return; // 或发送引导卡片
+        // 1. 处理开始动作
+        if (action?.value?.action === "start") {
+          const newSession = {
+            report_type: action.value.type,
+            status: "collecting",
+            images: [],
+            notes: [],
+            extracted: { model: "", vin: "", hours: "", date: new Date().toISOString() }
+          };
+          await saveSession(chatId, newSession, env);
+          await sendLarkMessage(chatId, { text: `✅ ${action.value.type} 流程已启动！\n您可以开始发送铭牌图片或文字备注，输入“结束”完成。` }, token);
+          return;
+        }
 
-      // 3. 处理消息内容
-      if (body.event?.message) {
-        const { message_type, content } = body.event.message;
-        
-        if (message_type === "text") {
-          const text = JSON.parse(content).text.trim();
-          if (text === "结束" || text === "end") {
-            // 执行生成文档流程
-          } else {
-            session.notes.push({ text, timestamp: Date.now() });
-            await saveSession(chatId, session, env);
+        // 2. 检查 Session
+        let session = await getSession(chatId, env);
+        if (!session) {
+          if (body.event?.message) {
+            await sendGuideCard(chatId, token);
           }
+          return;
         }
-        
-        if (message_type === "image") {
-          // 调用 ai.js 中的 askGemini 并更新 session
+
+        // 3. 处理消息
+        if (body.event?.message) {
+          const msg = body.event.message;
+          if (msg.message_type === "text") {
+            const text = JSON.parse(msg.content).text.trim();
+            if (text === "结束" || text === "end") {
+              await sendLarkMessage(chatId, { text: "🏁 正在生成报告文档..." }, token);
+              await deleteSession(chatId, env);
+            } else {
+              session.notes.push({ text, ts: Date.now() });
+              await saveSession(chatId, session, env);
+              await sendLarkMessage(chatId, { text: "✍️ 已记录备注" }, token);
+            }
+          }
+          // 图片处理逻辑待续...
         }
+      } catch (err) {
+        console.error("Worker Error:", err);
       }
     })());
 
