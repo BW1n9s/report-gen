@@ -11,7 +11,7 @@ export async function getLarkToken(env) {
   return data.tenant_access_token;
 }
 
-// 修正：确保 reply_message_id 参数正确传入 body
+// 核心修改：接收 replyId 並傳給 Lark API
 export async function sendLarkMessage(chatId, content, token, msgType = "text", replyId = null) {
   const body = {
     receive_id: chatId,
@@ -19,6 +19,7 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text", 
     content: JSON.stringify(content)
   };
   
+  // 如果有 replyId，Lark 會自動將這條訊息識別為引用回覆
   if (replyId) {
     body.reply_message_id = replyId;
   }
@@ -31,13 +32,13 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text", 
 }
 
 /**
- * 引导卡片
+ * 引導卡片
  */
 export async function sendGuideCard(chatId, token) {
   const content = {
-    header: { title: { tag: "plain_text", content: "🔍 任务助手" } },
+    header: { title: { tag: "plain_text", content: "🔍 任務助手" } },
     elements: [
-      { tag: "div", text: { tag: "plain_text", content: "当前没有进行中的任务，请选择类型开始：" } },
+      { tag: "div", text: { tag: "plain_text", content: "當前沒有進行中的任務，請選擇類型開始：" } },
       {
         tag: "action",
         actions: [
@@ -51,18 +52,18 @@ export async function sendGuideCard(chatId, token) {
 }
 
 /**
- * 会话冲突检查卡片
+ * 會話衝突檢查卡片
  */
 export async function sendConflictCard(chatId, token, existingType) {
   const content = {
-    header: { title: { tag: "plain_text", content: "⚠️ 会话冲突" }, template: "orange" },
+    header: { title: { tag: "plain_text", content: "⚠️ 會話衝突" }, template: "orange" },
     elements: [
-      { tag: "div", text: { tag: "lark_md", content: `检测到你有一个正在进行的 **${existingType}** 任务。\n直接发送图片即可继续，是否要放弃它并开启新任务？` } },
+      { tag: "div", text: { tag: "lark_md", content: `檢測到你有一個正在進行的 **${existingType}** 任務。\n直接發送圖片即可繼續，是否要放棄它並開啟新任務？` } },
       {
         tag: "action",
         actions: [
-          { tag: "button", text: { tag: "plain_text", content: "继续当前任务" }, type: "primary", value: { action: "continue" } },
-          { tag: "button", text: { tag: "plain_text", content: "覆盖并开启新任务" }, type: "danger", value: { action: "force_start" } }
+          { tag: "button", text: { tag: "plain_text", content: "繼續當前任務" }, type: "primary", value: { action: "continue" } },
+          { tag: "button", text: { tag: "plain_text", content: "覆蓋並開啟新任務" }, type: "danger", value: { action: "force_start" } }
         ]
       }
     ]
