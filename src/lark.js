@@ -1,4 +1,5 @@
 // src/lark.js
+
 export async function getLarkToken(env) {
   const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
     method: "POST",
@@ -18,16 +19,39 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text") 
   });
 }
 
+/**
+ * 引导卡片
+ */
 export async function sendGuideCard(chatId, token) {
   const content = {
-    header: { title: { tag: "plain_text", content: "🔍 未检测到进行中的 Report" } },
+    header: { title: { tag: "plain_text", content: "🔍 任务助手" } },
     elements: [
-      { tag: "div", text: { tag: "plain_text", content: "目前没有正在进行的会话，请点击按钮开始：" } },
+      { tag: "div", text: { tag: "plain_text", content: "当前没有进行中的任务，请选择类型开始：" } },
       {
         tag: "action",
         actions: [
           { tag: "button", text: { tag: "plain_text", content: "PD Report" }, type: "primary", value: { action: "start", type: "PD" } },
           { tag: "button", text: { tag: "plain_text", content: "Service Report" }, type: "default", value: { action: "start", type: "Service" } }
+        ]
+      }
+    ]
+  };
+  return await sendLarkMessage(chatId, content, token, "interactive");
+}
+
+/**
+ * 会话冲突检查卡片
+ */
+export async function sendConflictCard(chatId, token, existingType) {
+  const content = {
+    header: { title: { tag: "plain_text", content: "⚠️ 会话冲突" }, template: "orange" },
+    elements: [
+      { tag: "div", text: { tag: "lark_md", content: `检测到你有一个正在进行的 **${existingType}** 任务。\n直接发送图片即可继续，是否要放弃它并开启新任务？` } },
+      {
+        tag: "action",
+        actions: [
+          { tag: "button", text: { tag: "plain_text", content: "继续当前任务" }, type: "primary", value: { action: "continue" } },
+          { tag: "button", text: { tag: "plain_text", content: "覆盖并开启新任务" }, type: "danger", value: { action: "force_start" } }
         ]
       }
     ]
