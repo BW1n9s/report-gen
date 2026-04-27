@@ -108,17 +108,21 @@ export default {
       if (!chatId) return jsonResponse({ code: 0, msg: 'missing chat_id' });
 
       const messageId = event?.message?.message_id || null;
-      const token = await getLarkToken(env);
       const text = extractTextMessage(event);
+
+      // Fetch token and session in parallel to cut latency
+      const [token, session] = await Promise.all([
+        getLarkToken(env),
+        getSession(chatId, env)
+      ]);
 
       // 1. End command — works anytime inside a session
       if (text === '结束' || text.toLowerCase() === 'end') {
-        const current = await getSession(chatId, env);
-        if (!current) {
+        if (!session) {
           await replyLarkMessage(messageId, { text: '当前没有进行中的 session。' }, token);
           return jsonResponse({ code: 0 });
         }
-        const summary = buildSummary(current);
+        const summary = buildSummary(session);
         await deleteSession(chatId, env);
         await replyLarkMessage(messageId, { text: summary }, token);
         return jsonResponse({ code: 0 });
@@ -132,34 +136,31 @@ export default {
         }
 
         if (actionValue.action === 'start' || actionValue.action === 'force_start') {
-          const existing = await getSession(chatId, env);
-
-          if (existing && actionValue.action !== 'force_start') {
-            await sendConflictCard(chatId, token, existing.report_type, actionValue.type);
+          if (session && actionValue.action !== 'force_start') {
+            await sendConflictCard(chatId, token, session.report_type, actionValue.type);
             return jsonResponse({ code: 0 });
           }
 
           const reportType = actionValue.type;
-          const session = buildSession(reportType);
-          await saveSession(chatId, session, env);
-          await sendLarkMessage(chatId, { text: `🔄 已进入 ${reportType} session，正在初始化，请稍候...` }, token);
 
-          // Return to Feishu immediately, finish init in background
-          ctx.waitUntil((async () => {
-            // Place any async init work here (load templates, external APIs, etc.)
-            const activeSession = { ...session, status: 'active', initialized_at: Date.now() };
-            await saveSession(chatId, activeSession, env);
-            await sendLarkMessage(chatId, {
-              text: `✅ ${reportType} session 初始化完成，可以开始记录了。\n\n发送"结束"或"END"可结束 session 并输出记录。`
-            }, token);
-          })());
+          // Save active status synchronously BEFORE returning — KV must be committed
+          // before Feishu delivers the next message, otherwise getSession returns null.
+          const activeSession = { ...buildSession(reportType), status: 'active', initialized_at: Date.now() };
+          await saveSession(chatId, activeSession, env);
+
+          // Sending the confirmation message is non-critical; do it in background
+          // so Feishu gets its 200 response fast and stops showing the card spinner.
+          ctx.waitUntil(
+            sendLarkMessage(chatId, {
+              text: `✅ ${reportType} session 已就绪，开始记录吧！\n\n发送"结束"或"END"可结束 session 并输出记录。`
+            }, token)
+          );
 
           return jsonResponse({ code: 0 });
         }
       }
 
       // 3. In-session message handling
-      const session = await getSession(chatId, env);
       if (session) {
         if (session.status !== 'active') {
           await sendLarkMessage(chatId, { text: '⏳ Session 仍在初始化中，请稍候...' }, token);
