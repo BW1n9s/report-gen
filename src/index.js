@@ -28,11 +28,9 @@ export default {
     const menuKey = event?.key; 
     let actionValue = event?.action?.value || body.action?.value;
 
-    // 1. 菜单事件映射
     if (menuKey === "start_pd") actionValue = { action: "start", type: "PD" };
     if (menuKey === "start_service") actionValue = { action: "start", type: "Service" };
 
-    // 2. 结束逻辑
     if (menuKey === "end") {
       await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
       await deleteSession(chatId, env);
@@ -40,19 +38,14 @@ export default {
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 3. 开启新会话 (增加锁逻辑)
     if (actionValue?.action === "start" || actionValue?.action === "force_start") {
       const lockKey = `lock:${chatId}`;
-      const isLocked = await env.REPORT_SESSIONS.get(lockKey);
-      if (isLocked && actionValue?.action !== "force_start") return new Response(JSON.stringify({ code: 0 })); 
       await env.REPORT_SESSIONS.put(lockKey, "1", { expirationTtl: 60 }); 
-
       const existing = await getSession(chatId, env);
       if (existing && actionValue?.action !== "force_start") {
         await sendConflictCard(chatId, token, existing.report_type);
         return new Response(JSON.stringify({ code: 0 }));
       }
-
       const newSession = {
         report_type: actionValue.type || "PD",
         status: "collecting",
@@ -65,16 +58,21 @@ export default {
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 4. 正常业务流程
+    if (actionValue?.action === "continue") {
+      await sendLarkMessage(chatId, { text: "👍 已回到当前任务。请继续发送信息。" }, token);
+      return new Response(JSON.stringify({ code: 0 }));
+    }
+
+    // 优化后的会话读取逻辑
     let session = await getSession(chatId, env);
     if (!session) {
-      // 优化体验：如果没 Session 但有锁，说明是网络延迟，提示一下而不是展示菜单
       const isLocked = await env.REPORT_SESSIONS.get(`lock:${chatId}`);
+      // 如果还没 Session 但有锁，说明在初始化，友好提示
       if (isLocked) {
-         await sendLarkMessage(chatId, { text: "⏳ 正在加载任务，请稍候..." }, token);
+         await sendLarkMessage(chatId, { text: "⏳ 初始化中，请稍等..." }, token);
          return new Response(JSON.stringify({ code: 0 }));
       }
-
+      // 没有 Session 也没有锁，才弹引导菜单
       if (event?.message) await sendGuideCard(chatId, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
@@ -90,7 +88,7 @@ export default {
         } else {
           session.notes.push({ text, ts: Date.now() });
           await saveSession(chatId, session, env);
-          // 引用回复
+          // 纯粹的引用回复：不加额外文字，利用 Lark 自身的引用 UI 效果最好
           await sendLarkMessage(chatId, { text: "✍️ 备注已记录" }, token, "text", msg.message_id);
         }
       }

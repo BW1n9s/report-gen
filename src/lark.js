@@ -1,4 +1,5 @@
 // src/lark.js
+
 export async function getLarkToken(env) {
   const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
     method: "POST",
@@ -28,16 +29,11 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text", 
   });
 }
 
-// ... sendGuideCard 和 sendConflictCard 保持不变
-
-/**
- * 引導卡片
- */
 export async function sendGuideCard(chatId, token) {
   const content = {
-    header: { title: { tag: "plain_text", content: "🔍 任務助手" } },
+    header: { title: { tag: "plain_text", content: "🔍 任务助手" } },
     elements: [
-      { tag: "div", text: { tag: "plain_text", content: "當前沒有進行中的任務，請選擇類型開始：" } },
+      { tag: "div", text: { tag: "plain_text", content: "当前没有进行中的任务，请选择类型开始：" } },
       {
         tag: "action",
         actions: [
@@ -50,19 +46,16 @@ export async function sendGuideCard(chatId, token) {
   return await sendLarkMessage(chatId, content, token, "interactive");
 }
 
-/**
- * 會話衝突檢查卡片
- */
 export async function sendConflictCard(chatId, token, existingType) {
   const content = {
-    header: { title: { tag: "plain_text", content: "⚠️ 會話衝突" }, template: "orange" },
+    header: { title: { tag: "plain_text", content: "⚠️ 会话冲突" }, template: "orange" },
     elements: [
-      { tag: "div", text: { tag: "lark_md", content: `檢測到你有一個正在進行的 **${existingType}** 任務。\n直接發送圖片即可繼續，是否要放棄它並開啟新任務？` } },
+      { tag: "div", text: { tag: "lark_md", content: `检测到你有一个正在进行的 **${existingType}** 任务。\n直接发送图片即可继续，是否要放弃它并开启新任务？` } },
       {
         tag: "action",
         actions: [
-          { tag: "button", text: { tag: "plain_text", content: "繼續當前任務" }, type: "primary", value: { action: "continue" } },
-          { tag: "button", text: { tag: "plain_text", content: "覆蓋並開啟新任務" }, type: "danger", value: { action: "force_start" } }
+          { tag: "button", text: { tag: "plain_text", content: "继续当前任务" }, type: "primary", value: { action: "continue" } },
+          { tag: "button", text: { tag: "plain_text", content: "覆盖并开启新任务" }, type: "danger", value: { action: "force_start" } }
         ]
       }
     ]
