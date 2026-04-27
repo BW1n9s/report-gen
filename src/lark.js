@@ -1,70 +1,84 @@
-// src/lark.js
 export async function getLarkToken(env) {
-  const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+  const res = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ app_id: env.FEISHU_APP_ID, app_secret: env.FEISHU_APP_SECRET })
   });
+
   const data = await res.json();
   if (data.code !== 0) throw new Error(`Lark Token Error: ${data.msg}`);
   return data.tenant_access_token;
 }
 
-// 修改点：添加 replyId 参数并放入 JSON body 中
-export async function sendLarkMessage(chatId, content, token, msgType = "text", replyId = null) {
-  const body = {
+export async function sendLarkMessage(chatId, content, token, msgType = 'text', replyId = null) {
+  const payload = {
     receive_id: chatId,
     msg_type: msgType,
     content: JSON.stringify(content)
   };
-  
-  // 必须添加此字段才能实现引用/回复原文
-  if (replyId) {
-    body.reply_message_id = replyId;
-  }
 
-  const res = await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
-    method: "POST",
-    headers: { 
-      "Content-Type": "application/json", 
-      Authorization: `Bearer ${token}` 
+  // reply_message_id 会触发飞书原文引用样式
+  if (replyId) payload.reply_message_id = replyId;
+
+  const res = await fetch('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(payload)
   });
-  return await res.json();
+
+  return res.json();
 }
 
-// sendGuideCard 和 sendConflictCard 保持不变即可
 export async function sendGuideCard(chatId, token) {
   const content = {
-    header: { title: { tag: "plain_text", content: "🔍 任务助手" } },
+    header: { title: { tag: 'plain_text', content: '🔍 请选择 Report 类型' }, template: 'blue' },
     elements: [
-      { tag: "div", text: { tag: "plain_text", content: "当前没有进行中的任务，请选择：\n1️⃣ 点击下方菜单开始\n2️⃣ 或者点击下方按钮：" } },
       {
-        tag: "action",
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: '当前不在 session 内。\n请点击下面按钮选择进入：**PD** 或 **Service**。'
+        }
+      },
+      {
+        tag: 'action',
         actions: [
-          { tag: "button", text: { tag: "plain_text", content: "PD Report" }, type: "primary", value: { action: "start", type: "PD" } },
-          { tag: "button", text: { tag: "plain_text", content: "Service Report" }, type: "default", value: { action: "start", type: "Service" } }
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: 'PD' },
+            type: 'primary',
+            value: { action: 'start', type: 'PD' }
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: 'Service' },
+            type: 'default',
+            value: { action: 'start', type: 'Service' }
+          }
         ]
       }
     ]
   };
-  return await sendLarkMessage(chatId, content, token, "interactive");
+
+  return sendLarkMessage(chatId, content, token, 'interactive');
 }
 
 export async function sendConflictCard(chatId, token, existingType) {
   const content = {
-    header: { title: { tag: "plain_text", content: "⚠️ 会话冲突" }, template: "orange" },
+    header: { title: { tag: 'plain_text', content: '⚠️ 会话冲突' }, template: 'orange' },
     elements: [
-      { tag: "div", text: { tag: "lark_md", content: `检测到你有一个正在进行的 **${existingType}** 任务。\n是否要放弃它并开启新任务？` } },
       {
-        tag: "action",
-        actions: [
-          { tag: "button", text: { tag: "plain_text", content: "继续当前任务" }, type: "primary", value: { action: "continue" } },
-          { tag: "button", text: { tag: "plain_text", content: "覆盖并开启新任务" }, type: "danger", value: { action: "force_start" } }
-        ]
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: `检测到你有一个进行中的 **${existingType}** session。\n如需重新开始，请先发送 **结束/END**。`
+        }
       }
     ]
   };
-  return await sendLarkMessage(chatId, content, token, "interactive");
+
+  return sendLarkMessage(chatId, content, token, 'interactive');
 }
