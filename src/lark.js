@@ -10,6 +10,7 @@ export async function getLarkToken(env) {
   return data.tenant_access_token;
 }
 
+// 修改点：添加 replyId 参数并放入 JSON body 中
 export async function sendLarkMessage(chatId, content, token, msgType = "text", replyId = null) {
   const body = {
     receive_id: chatId,
@@ -17,18 +18,23 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text", 
     content: JSON.stringify(content)
   };
   
+  // 必须添加此字段才能实现引用/回复原文
   if (replyId) {
-    body.reply_message_id = replyId; // 关键：引用回复参数
+    body.reply_message_id = replyId;
   }
 
-  return await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
+  const res = await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    headers: { 
+      "Content-Type": "application/json", 
+      Authorization: `Bearer ${token}` 
+    },
     body: JSON.stringify(body)
   });
+  return await res.json();
 }
 
-// ... sendGuideCard 和 sendConflictCard 保持不变 ...
+// sendGuideCard 和 sendConflictCard 保持不变即可
 export async function sendGuideCard(chatId, token) {
   const content = {
     header: { title: { tag: "plain_text", content: "🔍 任务助手" } },
