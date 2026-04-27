@@ -15,23 +15,32 @@ export default {
 
     if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
 
-    // 1. 统一提取 ID
     const event = body.event;
     const chatId = event?.message?.chat_id || 
                    event?.action?.open_chat_id || 
+                   event?.open_chat_id || 
                    body.action?.open_chat_id || 
-                   event?.context?.open_chat_id || 
-                   body.open_chat_id;
+                   event?.context?.open_chat_id;
 
     if (!chatId) return new Response("OK");
 
-    // 注意：我们将处理逻辑移出 ctx.waitUntil，直接 await 执行，
-    // 这样能确保 Session 写入完成后才返回响应，防止读取到空 Session
     const token = await getLarkToken(env);
-    const action = event?.action || body.action;
-    const actionValue = action?.value;
+    const menuKey = event?.key; 
+    let actionValue = event?.action?.value || body.action?.value;
 
-    // --- A. 开启新会话逻辑 ---
+    // 1. 菜单事件映射
+    if (menuKey === "start_pd") actionValue = { action: "start", type: "PD" };
+    if (menuKey === "start_service") actionValue = { action: "start", type: "Service" };
+
+    // 2. 处理“结束”逻辑 (支持菜单点击)
+    if (menuKey === "end") {
+      await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
+      await deleteSession(chatId, env);
+      await sendLarkMessage(chatId, { text: "✅ 会话已关闭。" }, token);
+      return new Response(JSON.stringify({ code: 0 }));
+    }
+
+    // 3. 开启新会话逻辑 (保留 60s 锁)
     if (actionValue?.action === "start" || actionValue?.action === "force_start") {
       const lockKey = `lock:${chatId}`;
       const isLocked = await env.REPORT_SESSIONS.get(lockKey);
@@ -56,13 +65,13 @@ export default {
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // --- B. 继续任务逻辑 ---
+    // 4. 继续任务逻辑
     if (actionValue?.action === "continue") {
       await sendLarkMessage(chatId, { text: "👍 已回到当前任务。请继续发送信息。" }, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // --- C. 正常业务流程 ---
+    // 5. 正常业务流程 (备注与文字结束)
     let session = await getSession(chatId, env);
     if (!session) {
       if (event?.message) await sendGuideCard(chatId, token);
@@ -73,6 +82,7 @@ export default {
       const msg = event.message;
       if (msg.message_type === "text") {
         const text = JSON.parse(msg.content).text.trim();
+        // 文字输入的结束逻辑
         if (text === "结束" || text === "end") {
           await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
           await deleteSession(chatId, env);
@@ -80,7 +90,6 @@ export default {
         } else {
           session.notes.push({ text, ts: Date.now() });
           await saveSession(chatId, session, env);
-          // 引用原文回复
           await sendLarkMessage(chatId, { text: `✍️ 备注已记录: "${text}"` }, token);
         }
       }
