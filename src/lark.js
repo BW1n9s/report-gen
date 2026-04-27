@@ -11,11 +11,22 @@ export async function getLarkToken(env) {
   return data.tenant_access_token;
 }
 
-export async function sendLarkMessage(chatId, content, token, msgType = "text") {
+// 增加了 replyId 参数支持
+export async function sendLarkMessage(chatId, content, token, msgType = "text", replyId = null) {
+  const body = {
+    receive_id: chatId,
+    msg_type: msgType,
+    content: JSON.stringify(content)
+  };
+  
+  if (replyId) {
+    body.reply_message_id = replyId;
+  }
+
   return await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ receive_id: chatId, msg_type: msgType, content: JSON.stringify(content) })
+    body: JSON.stringify(body)
   });
 }
 

@@ -71,7 +71,7 @@ export default {
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 5. 正常业务流程 (备注与文字结束)
+    // 5. 正常业务流程
     let session = await getSession(chatId, env);
     if (!session) {
       if (event?.message) await sendGuideCard(chatId, token);
@@ -90,7 +90,8 @@ export default {
         } else {
           session.notes.push({ text, ts: Date.now() });
           await saveSession(chatId, session, env);
-          await sendLarkMessage(chatId, { text: `✍️ 备注已记录: "${text}"` }, token);
+          // 引用原文回复: 传入 msg.message_id
+          await sendLarkMessage(chatId, { text: "✍️ 备注已记录" }, token, "text", msg.message_id);
         }
       }
     }
