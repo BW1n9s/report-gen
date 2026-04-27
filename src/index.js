@@ -37,7 +37,7 @@ export default {
           const lockKey = `lock:${chatId}`;
           const isLocked = await env.REPORT_SESSIONS.get(lockKey);
           if (isLocked && actionValue?.action !== "force_start") return; 
-          await env.REPORT_SESSIONS.put(lockKey, "1", { expirationTtl: 10 }); // 10秒锁
+          await env.REPORT_SESSIONS.put(lockKey, "1", { expirationTtl: 60 }); // 10秒锁
 
           const existing = await getSession(chatId, env);
           
