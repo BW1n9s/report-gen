@@ -1,5 +1,3 @@
-// src/session.js
-
 /**
  * 获取 Session
  */
@@ -12,10 +10,10 @@ export async function getSession(chatId, env) {
 /**
  * 保存 Session
  */
-export async function saveSession(chatId, session, env) {
+export async function saveSession(chatId, session, env, expirationTtl = 86400) {
   if (!chatId) return;
-  await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session), { 
-    expirationTtl: 86400 
+  await env.REPORT_SESSIONS.put(chatId, JSON.stringify(session), {
+    expirationTtl
   });
 }
 
