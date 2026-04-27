@@ -221,7 +221,9 @@ KV读写延迟
 
 
 八、结构：
-index.js 后端与lark的通讯功能，记录report开始结束，将用户输入文字传给process，将用户输入图片传给imgpro
-imgpro.js 处理index传入的图片，传给指定模型（目前使用gemini2.5），并返回相应tag和文字内容
-process.js 主函数，处理index,imgpro返回的tag和文字内容
-report.js 根据process结果生成lark文档
+src/
+├── index.js          # 入口文件：处理 Webhook 分发与解密
+├── session.js        # 会话管理：封装 KV 读写逻辑
+├── ai.js             # AI 逻辑：封装 Gemini 识别与 Prompt
+├── lark.js           # 飞书 API：封装消息发送、图片下载、文档创建
+└── utils.js          # 工具函数：加密解密、Buffer 转换
