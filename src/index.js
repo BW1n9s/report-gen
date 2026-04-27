@@ -81,7 +81,7 @@ export default {
         return new Response(JSON.stringify({ code: 0 }));
       }
 
-      await env.REPORT_SESSIONS.put(lockKey, '1', { expirationTtl: 20 });
+      await env.REPORT_SESSIONS.put(lockKey, '1', { expirationTtl: 60 });
       const newSession = {
         report_type: actionValue.type || 'PD',
         status: 'collecting',
