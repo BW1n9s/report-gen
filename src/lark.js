@@ -1,5 +1,4 @@
 // src/lark.js
-
 export async function getLarkToken(env) {
   const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
     method: "POST",
@@ -11,7 +10,6 @@ export async function getLarkToken(env) {
   return data.tenant_access_token;
 }
 
-// 核心修改：接收 replyId 並傳給 Lark API
 export async function sendLarkMessage(chatId, content, token, msgType = "text", replyId = null) {
   const body = {
     receive_id: chatId,
@@ -19,7 +17,6 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text", 
     content: JSON.stringify(content)
   };
   
-  // 如果有 replyId，Lark 會自動將這條訊息識別為引用回覆
   if (replyId) {
     body.reply_message_id = replyId;
   }
@@ -30,6 +27,8 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text", 
     body: JSON.stringify(body)
   });
 }
+
+// ... sendGuideCard 和 sendConflictCard 保持不变
 
 /**
  * 引導卡片

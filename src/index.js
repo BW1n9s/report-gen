@@ -28,19 +28,19 @@ export default {
     const menuKey = event?.key; 
     let actionValue = event?.action?.value || body.action?.value;
 
-    // 1. 菜單事件映射
+    // 1. 菜单事件映射
     if (menuKey === "start_pd") actionValue = { action: "start", type: "PD" };
     if (menuKey === "start_service") actionValue = { action: "start", type: "Service" };
 
-    // 2. 處理“結束”邏輯
+    // 2. 结束逻辑
     if (menuKey === "end") {
-      await sendLarkMessage(chatId, { text: "🏁 正在生成報告..." }, token);
+      await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
       await deleteSession(chatId, env);
-      await sendLarkMessage(chatId, { text: "✅ 會話已關閉。" }, token);
+      await sendLarkMessage(chatId, { text: "✅ 会话已关闭。" }, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 3. 開啟新會話邏輯
+    // 3. 开启新会话 (增加锁逻辑)
     if (actionValue?.action === "start" || actionValue?.action === "force_start") {
       const lockKey = `lock:${chatId}`;
       const isLocked = await env.REPORT_SESSIONS.get(lockKey);
@@ -61,19 +61,20 @@ export default {
         extracted: { model: "", vin: "", hours: "", date: new Date().toISOString() }
       };
       await saveSession(chatId, newSession, env);
-      await sendLarkMessage(chatId, { text: `✅ ${newSession.report_type} 流程已啟動！\n您可以發送圖片或文字，輸入“結束”完成。` }, token);
+      await sendLarkMessage(chatId, { text: `✅ ${newSession.report_type} 流程已启动！\n您可以发送图片或文字，输入“结束”完成。` }, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 4. 繼續任務邏輯
-    if (actionValue?.action === "continue") {
-      await sendLarkMessage(chatId, { text: "👍 已回到當前任務。請繼續發送信息。" }, token);
-      return new Response(JSON.stringify({ code: 0 }));
-    }
-
-    // 5. 正常業務流程
+    // 4. 正常业务流程
     let session = await getSession(chatId, env);
     if (!session) {
+      // 优化体验：如果没 Session 但有锁，说明是网络延迟，提示一下而不是展示菜单
+      const isLocked = await env.REPORT_SESSIONS.get(`lock:${chatId}`);
+      if (isLocked) {
+         await sendLarkMessage(chatId, { text: "⏳ 正在加载任务，请稍候..." }, token);
+         return new Response(JSON.stringify({ code: 0 }));
+      }
+
       if (event?.message) await sendGuideCard(chatId, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
@@ -82,17 +83,15 @@ export default {
       const msg = event.message;
       if (msg.message_type === "text") {
         const text = JSON.parse(msg.content).text.trim();
-        if (text === "結束" || text === "end") {
-          await sendLarkMessage(chatId, { text: "🏁 正在生成報告..." }, token);
+        if (text === "结束" || text === "end") {
+          await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
           await deleteSession(chatId, env);
-          await sendLarkMessage(chatId, { text: "✅ 會話已關閉。" }, token);
+          await sendLarkMessage(chatId, { text: "✅ 会话已关闭。" }, token);
         } else {
           session.notes.push({ text, ts: Date.now() });
           await saveSession(chatId, session, env);
-          
-          // 關鍵修改：只發送簡短確認，並指定 msg.message_id 進行引用
-          // 這會讓 Lark 自動顯示引用界面
-          await sendLarkMessage(chatId, { text: "✍️ 備註已記錄" }, token, "text", msg.message_id);
+          // 引用回复
+          await sendLarkMessage(chatId, { text: "✍️ 备注已记录" }, token, "text", msg.message_id);
         }
       }
     }
