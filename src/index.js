@@ -1,5 +1,5 @@
 import { decrypt } from './utils.js';
-import { getSession, saveSession, deleteSession } from './session.js';
+import { getSession, getSessionWithRetry, saveSession, deleteSession } from './session.js';
 import { getLarkToken, sendLarkMessage, replyLarkMessage, sendGuideCard, sendConflictCard } from './lark.js';
 
 function jsonResponse(payload, status = 200) {
@@ -123,10 +123,13 @@ export default {
       const messageId = event?.message?.message_id || null;
       const text = extractTextMessage(event);
 
-      // Fetch token and session in parallel to cut latency
+      // Card actions have a 3s Feishu timeout — use fast getSession (no retry).
+      // Text/image messages have a 5s timeout — use getSessionWithRetry (2s poll)
+      // to handle cross-PoP KV propagation lag after a card button click.
+      const isMessageEvent = !!event?.message;
       const [token, session] = await Promise.all([
         getLarkToken(env),
-        getSession(chatId, env)
+        isMessageEvent ? getSessionWithRetry(chatId, env) : getSession(chatId, env)
       ]);
 
       // 1. End command — works anytime inside a session

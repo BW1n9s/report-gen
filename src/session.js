@@ -1,11 +1,5 @@
 const KV_TTL = 86400;
 
-// Cache API is PoP-local — fast when the card click and the message hit the
-// same Cloudflare edge node, but useless across PoPs (Feishu may deliver
-// different event types from different servers → different PoPs).
-// KV is globally eventual: typically propagates in <2s within the same region,
-// but can take up to 60s across regions. The retry below covers that gap.
-
 function cacheUrl(chatId) {
   return `https://session-cache.internal/${encodeURIComponent(chatId)}`;
 }
@@ -32,34 +26,38 @@ async function cacheDelete(chatId) {
 
 async function kvRead(chatId, env) {
   const raw = await env.REPORT_SESSIONS.get(chatId);
-  return raw ? JSON.parse(raw) : null;
+  if (!raw) return null;
+  const session = JSON.parse(raw);
+  await cacheWrite(chatId, session); // warm local cache on KV hit
+  return session;
 }
 
+// Fast path — no retry. Use for card action events (Feishu 3s timeout).
 export async function getSession(chatId, env) {
   if (!chatId) return null;
+  const cached = await cacheRead(chatId);
+  if (cached !== undefined) return cached;
+  return kvRead(chatId, env);
+}
 
-  // 1. Same-PoP cache hit → instant, no network
+// Retrying path — use for text/image message events (Feishu 5s timeout).
+// Polls KV every 500ms for up to 2s to handle cross-PoP propagation lag.
+// Total time including processing stays well within the 5s limit.
+export async function getSessionWithRetry(chatId, env) {
+  if (!chatId) return null;
+
   const cached = await cacheRead(chatId);
   if (cached !== undefined) return cached;
 
-  // 2. First KV attempt
+  // First KV attempt
   const first = await kvRead(chatId, env);
-  if (first !== null) {
-    await cacheWrite(chatId, first); // warm cache for next read
-    return first;
-  }
+  if (first !== null) return first;
 
-  // 3. KV returned null — could be "no session" OR cross-PoP propagation lag.
-  //    Poll every 500 ms for up to 2 s. KV typically propagates within this
-  //    window for same-region writes. Feishu's 5-second timeout leaves us ~2.5 s
-  //    of headroom after accounting for normal processing time (~500 ms).
+  // Retry loop: 4 × 500ms = 2s max wait
   for (let i = 0; i < 4; i++) {
     await new Promise(r => setTimeout(r, 500));
     const retry = await kvRead(chatId, env);
-    if (retry !== null) {
-      await cacheWrite(chatId, retry);
-      return retry;
-    }
+    if (retry !== null) return retry;
   }
 
   return null;
