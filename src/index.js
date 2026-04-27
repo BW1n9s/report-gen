@@ -2,9 +2,6 @@ import { decrypt } from './utils.js';
 import { getSession, saveSession, deleteSession } from './session.js';
 import { getLarkToken, sendLarkMessage, replyLarkMessage, sendGuideCard, sendConflictCard } from './lark.js';
 
-// Re-export the Durable Object class — Wrangler requires it from the main entry point
-export { SessionDO } from './session-do.js';
-
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -106,14 +103,17 @@ export default {
         return jsonResponse({ challenge: body.verification });
       }
 
-      // Deduplicate — Feishu retries if we don't respond within ~5s.
-      // Use KV (best-effort) to drop duplicate event deliveries.
+      // Deduplicate — Feishu retries the same event if we take too long.
+      // Cache API is PoP-local and instantly consistent, so retries hitting the
+      // same edge node (the common case) are dropped immediately.
       const eventId = body?.header?.event_id;
       if (eventId) {
-        const dedupKey = `dedup:${eventId}`;
-        const seen = await env.REPORT_SESSIONS.get(dedupKey);
+        const dedupUrl = `https://dedup.internal/${eventId}`;
+        const seen = await caches.default.match(dedupUrl);
         if (seen) return jsonResponse({ code: 0 });
-        await env.REPORT_SESSIONS.put(dedupKey, '1', { expirationTtl: 60 });
+        await caches.default.put(dedupUrl, new Response('1', {
+          headers: { 'Cache-Control': 'max-age=60' }
+        }));
       }
 
       const event = body?.event || {};

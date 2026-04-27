@@ -1,6 +1,11 @@
 const LARK_API = 'https://open.feishu.cn/open-apis';
+const TOKEN_CACHE_URL = 'https://lark-token.internal/token';
 
 export async function getLarkToken(env) {
+  // Token is valid for 7200s — serve from Cache API (PoP-local, instant) when warm
+  const cached = await caches.default.match(TOKEN_CACHE_URL);
+  if (cached) return await cached.text();
+
   const res = await fetch(`${LARK_API}/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
@@ -9,6 +14,13 @@ export async function getLarkToken(env) {
 
   const data = await res.json();
   if (data.code !== 0) throw new Error(`Lark Token Error: ${data.msg}`);
+
+  // Cache for 6960s (7200s validity - 4 minutes buffer)
+  await caches.default.put(
+    TOKEN_CACHE_URL,
+    new Response(data.tenant_access_token, { headers: { 'Cache-Control': 'max-age=6960' } })
+  );
+
   return data.tenant_access_token;
 }
 
