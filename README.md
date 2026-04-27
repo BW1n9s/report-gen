@@ -218,3 +218,10 @@ KV读写延迟
 不要一次处理太多图
 
 不要存大图（只存 key）
+
+
+八、结构：
+index.js 后端与lark的通讯功能，记录report开始结束，将用户输入文字传给process，将用户输入图片传给imgpro
+imgpro.js 处理index传入的图片，传给指定模型（目前使用gemini2.5），并返回相应tag和文字内容
+process.js 主函数，处理index,imgpro返回的tag和文字内容
+report.js 根据process结果生成lark文档
