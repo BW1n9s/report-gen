@@ -1,5 +1,4 @@
 // src/lark.js
-
 export async function getLarkToken(env) {
   const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
     method: "POST",
@@ -19,7 +18,7 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text", 
   };
   
   if (replyId) {
-    body.reply_message_id = replyId;
+    body.reply_message_id = replyId; // 关键：引用回复参数
   }
 
   return await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
@@ -29,6 +28,7 @@ export async function sendLarkMessage(chatId, content, token, msgType = "text", 
   });
 }
 
+// ... sendGuideCard 和 sendConflictCard 保持不变 ...
 export async function sendGuideCard(chatId, token) {
   const content = {
     header: { title: { tag: "plain_text", content: "🔍 任务助手" } },
