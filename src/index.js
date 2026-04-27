@@ -2,37 +2,17 @@ import { decrypt } from './utils.js';
 import { getSession, saveSession, deleteSession } from './session.js';
 import { getLarkToken, sendLarkMessage, sendGuideCard, sendConflictCard } from './lark.js';
 
-// 辅助函数保持不变
-function extractChatId(body) {
-  const event = body?.event || {};
-  return event?.message?.chat_id || event?.chat_id || event?.open_chat_id || null;
-}
-
-function extractActionValue(body) {
-  return body?.action?.value || body?.event?.action?.value || null;
-}
-
-function extractMenuKey(body) {
-  const event = body?.event || {};
-  return event?.event_key || event?.key || null;
-}
-
+// 提取消息文本的辅助函数
 function extractTextMessage(event) {
   if (!event?.message || event.message.message_type !== 'text') return null;
   try {
-    const parsed = JSON.parse(event.message.content || '{}');
-    return (parsed?.text || '').trim();
+    const content = JSON.parse(event.message.content || '{}');
+    return (content?.text || '').trim();
   } catch { return ''; }
-}
-
-function formatSessionSummary(session) {
-  return `📊 **会话已结束，内容摘要**：\n类型: ${session.report_type}\n备注: ${session.notes.length}\n图片: ${session.images.length}`;
 }
 
 export default {
   async fetch(request, env) {
-    console.log("🚀 [Log] Worker 收到请求");
-
     if (request.method !== 'POST') return new Response('OK');
 
     let body;
@@ -40,82 +20,76 @@ export default {
       const raw = await request.json();
       if (raw.encrypt) {
         body = await decrypt(raw.encrypt, env.FEISHU_ENCRYPT_KEY);
-        console.log("✅ [Log] 解密成功:", JSON.stringify(body));
       } else {
         body = raw;
       }
+      // 记录收到的所有内容，方便在 Cloudflare Logs 查看
+      console.log("📥 [Log] 收到请求体:", JSON.stringify(body));
     } catch (e) {
-      console.error("❌ [Log] 解密或解析失败:", e);
-      return new Response('OK'); // 必须返回OK防止飞书重试
+      console.error("❌ [Log] 解析失败:", e);
+      return new Response('OK');
     }
 
     if (body.type === 'url_verification') {
-      console.log("🔗 [Log] 收到验证请求");
       return new Response(JSON.stringify({ challenge: body.challenge }));
     }
 
     const event = body.event;
-    const chatId = extractChatId(body);
-    console.log("🆔 [Log] 当前 ChatID:", chatId);
-    
-    if (!chatId) {
-      console.log("⚠️ [Log] 无法获取 ChatID，跳过处理");
-      return new Response('OK');
-    }
-
-    const token = await getLarkToken(env);
-    const menuKey = extractMenuKey(body);
-    let actionValue = extractActionValue(body);
-    
-    console.log(`🔍 [Log] MenuKey: ${menuKey}, ActionValue: ${JSON.stringify(actionValue)}`);
-
-    // 快捷菜单映射
-    if (menuKey === 'start_pd') actionValue = { action: 'start', type: 'PD' };
-    if (menuKey === 'start_service') actionValue = { action: 'start', type: 'Service' };
-
-    // 处理结束命令
+    const chatId = event?.message?.chat_id || event?.chat_id || null;
+    const messageId = event?.message?.message_id;
     const text = extractTextMessage(event);
+
+    if (!chatId) return new Response('OK');
+    const token = await getLarkToken(env);
+
+    console.log(`🆔 ChatID: ${chatId}, 💬 识别文本: "${text}"`);
+
+    // 1. 处理结束命令 (不依赖 Session 状态)
     if (text === '结束' || text?.toLowerCase() === 'end') {
-      console.log("🛑 [Log] 收到结束指令");
       const session = await getSession(chatId, env);
       if (session) {
         await deleteSession(chatId, env);
-        await sendLarkMessage(chatId, { text: `✅ 会话已手动结束。` }, token);
-      }
-      return new Response(JSON.stringify({ code: 0 }));
-    }
-
-    // 处理启动逻辑
-    if (actionValue?.action === 'start') {
-      console.log("⚡ [Log] 尝试启动 Session:", actionValue.type);
-      const existing = await getSession(chatId, env);
-      if (existing) {
-        console.log("⚠️ [Log] Session 已存在，发送冲突卡片");
-        await sendConflictCard(chatId, token, existing.report_type);
+        await sendLarkMessage(chatId, { text: `✅ 会话已结束。` }, token);
       } else {
-        const newSession = { report_type: actionValue.type, status: 'collecting', images: [], notes: [], extracted: {} };
-        await saveSession(chatId, newSession, env);
-        console.log("✅ [Log] Session 初始化成功");
-        await sendLarkMessage(chatId, { text: `✅ 已进入 ${newSession.report_type} 模式。` }, token);
+        await sendLarkMessage(chatId, { text: '⚠️ 当前没有进行中的会话。' }, token);
       }
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 处理会话内逻辑
+    // 2. 检查是否有 Session
     let session = await getSession(chatId, env);
+
+    // 3. 处理“启动会话”逻辑 (通过文本匹配按钮文字)
+    // 假设你的按钮发送的文字就是 "PD" 或 "Service"
+    if (!session && (text === 'PD' || text === 'Service')) {
+      console.log(`⚡ [Log] 触发启动: ${text}`);
+      const newSession = { 
+        report_type: text, 
+        status: 'collecting', 
+        images: [], 
+        notes: [], 
+        extracted: {} 
+      };
+      await saveSession(chatId, newSession, env);
+      await sendLarkMessage(chatId, { text: `✅ 已进入 ${text} 模式，请开始发送内容。` }, token);
+      return new Response(JSON.stringify({ code: 0 }));
+    }
+
+    // 4. 未进入 Session 时的引导
     if (!session) {
       console.log("🧐 [Log] 未在 Session 中，发送引导卡片");
-      if (event?.message) await sendGuideCard(chatId, token);
+      await sendGuideCard(chatId, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    console.log("📝 [Log] 处理会话消息");
+    // 5. 会话内消息处理
+    console.log("📝 [Log] 处理会话内容...");
     if (event?.message?.message_type === 'image') {
-      await sendLarkMessage(chatId, { text: '📸 图片已收到。' }, token);
+      await sendLarkMessage(chatId, { text: '📸 图片已收到。' }, token, 'text', messageId);
     } else if (text) {
       session.notes.push({ text, ts: Date.now() });
       await saveSession(chatId, session, env);
-      await sendLarkMessage(chatId, { text: `✍️ 收到记录。` }, token);
+      await sendLarkMessage(chatId, { text: `✍️ 备注已记录` }, token, 'text', messageId);
     }
 
     return new Response(JSON.stringify({ code: 0 }));
