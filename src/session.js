@@ -49,14 +49,17 @@ export async function getSession(chatId, env) {
     return first;
   }
 
-  // 3. KV returned null — could be "no session" OR "cross-PoP propagation lag".
-  //    Wait 800 ms then retry once. Adds latency only when cache is cold and KV
-  //    is empty; Feishu's 5-second timeout gives us plenty of headroom.
-  await new Promise(r => setTimeout(r, 800));
-  const second = await kvRead(chatId, env);
-  if (second !== null) {
-    await cacheWrite(chatId, second);
-    return second;
+  // 3. KV returned null — could be "no session" OR cross-PoP propagation lag.
+  //    Poll every 500 ms for up to 2 s. KV typically propagates within this
+  //    window for same-region writes. Feishu's 5-second timeout leaves us ~2.5 s
+  //    of headroom after accounting for normal processing time (~500 ms).
+  for (let i = 0; i < 4; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    const retry = await kvRead(chatId, env);
+    if (retry !== null) {
+      await cacheWrite(chatId, retry);
+      return retry;
+    }
   }
 
   return null;
