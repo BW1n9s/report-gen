@@ -55,7 +55,7 @@ export default {
       }
 
       // 设置锁并创建会话
-      await env.REPORT_SESSIONS.put(lockKey, "1", { expirationTtl: 60 }); 
+      await env.REPORT_SESSIONS.put(lockKey, "1", { expirationTtl: 10 }); 
       const newSession = {
         report_type: actionValue.type || "PD",
         status: "collecting",
