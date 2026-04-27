@@ -13,39 +13,49 @@ export default {
       if (body.encrypt) body = await decrypt(body.encrypt, env.FEISHU_ENCRYPT_KEY);
     } catch (e) { return new Response("OK"); }
 
+    // 飞书 URL 验证
     if (body.type === "url_verification") return new Response(JSON.stringify({ challenge: body.challenge }));
 
     const event = body.event;
+    // 获取各种场景下的 chatId
     const chatId = event?.message?.chat_id || 
                    event?.action?.open_chat_id || 
                    event?.open_chat_id || 
-                   body.action?.open_chat_id || 
-                   event?.context?.open_chat_id;
+                   body.action?.open_chat_id;
 
     if (!chatId) return new Response("OK");
 
     const token = await getLarkToken(env);
-    const menuKey = event?.key; 
+    
+    // 关键修正：兼容自定义菜单的 event_key
+    const menuKey = event?.event_key || event?.key; 
     let actionValue = event?.action?.value || body.action?.value;
 
+    // 1. 映射底部菜单事件到 actionValue
     if (menuKey === "start_pd") actionValue = { action: "start", type: "PD" };
     if (menuKey === "start_service") actionValue = { action: "start", type: "Service" };
 
-    if (menuKey === "end") {
+    // 2. 处理“结束会话”逻辑 (匹配 end_session)
+    if (menuKey === "end_session") {
       await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
       await deleteSession(chatId, env);
-      await sendLarkMessage(chatId, { text: "✅ 会话已关闭。" }, token);
+      await env.REPORT_SESSIONS.delete(`lock:${chatId}`); // 清除锁
+      await sendLarkMessage(chatId, { text: "✅ 会话已成功关闭。" }, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
 
+    // 3. 处理开始或强制开始逻辑
     if (actionValue?.action === "start" || actionValue?.action === "force_start") {
       const lockKey = `lock:${chatId}`;
-      await env.REPORT_SESSIONS.put(lockKey, "1", { expirationTtl: 60 }); 
+      
       const existing = await getSession(chatId, env);
       if (existing && actionValue?.action !== "force_start") {
         await sendConflictCard(chatId, token, existing.report_type);
         return new Response(JSON.stringify({ code: 0 }));
       }
+
+      // 设置锁并创建会话
+      await env.REPORT_SESSIONS.put(lockKey, "1", { expirationTtl: 60 }); 
       const newSession = {
         report_type: actionValue.type || "PD",
         status: "collecting",
@@ -54,43 +64,48 @@ export default {
         extracted: { model: "", vin: "", hours: "", date: new Date().toISOString() }
       };
       await saveSession(chatId, newSession, env);
-      await sendLarkMessage(chatId, { text: `✅ ${newSession.report_type} 流程已启动！\n您可以发送图片或文字，输入“结束”完成。` }, token);
+      await sendLarkMessage(chatId, { text: `✅ ${newSession.report_type} 流程已启动！\n直接发送图片或文字即可记录，输入“结束”完成。` }, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
 
+    // 4. 处理继续任务逻辑
     if (actionValue?.action === "continue") {
-      await sendLarkMessage(chatId, { text: "👍 已回到当前任务。请继续发送信息。" }, token);
+      await sendLarkMessage(chatId, { text: "👍 已回到当前任务。" }, token);
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    // 优化后的会话读取逻辑
+    // 5. 业务消息处理
     let session = await getSession(chatId, env);
+    
+    // 解决延迟体验问题：如果读取不到 session 
     if (!session) {
       const isLocked = await env.REPORT_SESSIONS.get(`lock:${chatId}`);
-      // 如果还没 Session 但有锁，说明在初始化，友好提示
       if (isLocked) {
-         await sendLarkMessage(chatId, { text: "⏳ 初始化中，请稍等..." }, token);
-         return new Response(JSON.stringify({ code: 0 }));
+        // 如果有锁但没 session，说明 KV 还没同步完，此时不做报错处理，允许静默等待
+        return new Response(JSON.stringify({ code: 0 }));
       }
-      // 没有 Session 也没有锁，才弹引导菜单
-      if (event?.message) await sendGuideCard(chatId, token);
+      
+      // 只有在没 Session 且没锁的情况下，才给用户发引导卡片
+      if (event?.message) {
+        await sendGuideCard(chatId, token);
+      }
       return new Response(JSON.stringify({ code: 0 }));
     }
 
-    if (event?.message) {
-      const msg = event.message;
-      if (msg.message_type === "text") {
-        const text = JSON.parse(msg.content).text.trim();
-        if (text === "结束" || text === "end") {
-          await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
-          await deleteSession(chatId, env);
-          await sendLarkMessage(chatId, { text: "✅ 会话已关闭。" }, token);
-        } else {
-          session.notes.push({ text, ts: Date.now() });
-          await saveSession(chatId, session, env);
-          // 纯粹的引用回复：不加额外文字，利用 Lark 自身的引用 UI 效果最好
-          await sendLarkMessage(chatId, { text: "✍️ 备注已记录" }, token, "text", msg.message_id);
-        }
+    // 记录文字备注
+    if (event?.message && event.message.message_type === "text") {
+      const text = JSON.parse(event.message.content).text.trim();
+      
+      if (text === "结束" || text === "end") {
+        await sendLarkMessage(chatId, { text: "🏁 正在生成报告..." }, token);
+        await deleteSession(chatId, env);
+        await env.REPORT_SESSIONS.delete(`lock:${chatId}`);
+        await sendLarkMessage(chatId, { text: "✅ 会话已关闭。" }, token);
+      } else {
+        session.notes.push({ text, ts: Date.now() });
+        await saveSession(chatId, session, env);
+        // 使用引用回复方式确认
+        await sendLarkMessage(chatId, { text: "✍️ 备注已记录" }, token, "text", event.message.message_id);
       }
     }
 
