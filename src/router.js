@@ -1,6 +1,10 @@
-import { handleImageMessage } from './functions/analyzeImage.js';
+import { analyzeImage } from './functions/analyzeImage.js';
 import { handleTextMessage } from './functions/analyzeText.js';
 import { handleCommand } from './functions/commands.js';
+import { withUserQueue } from './utils/userQueue.js';
+import { parseCorrection } from './utils/parseCorrection.js';
+import { replyToMessage } from './services/lark.js';
+import { getSession, updateSession } from './services/session.js';
 
 const COMMAND_KEYWORDS = new Set([
   'START', 'CHECKSTATUS', 'END',
@@ -21,12 +25,42 @@ export async function routeMessage(event, env) {
     let content;
     try { content = JSON.parse(message.content ?? '{}'); } catch { content = {}; }
 
-    const ctx = { message, userId, chatId, content, env };
-
     if (messageType === 'image') {
-      await handleImageMessage(ctx);
-    } else if (messageType === 'text') {
+      const messageId = message.message_id;
+      const imageKey = content.image_key;
+      const session = await getSession(userId, env);
+      await withUserQueue(env.REPORT_SESSIONS, userId, async () => {
+        await analyzeImage(imageKey, messageId, session, userId, env);
+      });
+      return;
+    }
+
+    if (messageType === 'text') {
+      const parentId = message.parent_id;
+      if (parentId) {
+        const text = (content.text ?? '').trim();
+        const session = await getSession(userId, env);
+        const correction = parseCorrection(text, session);
+        if (correction) {
+          if (!session.vehicle) session.vehicle = {};
+          Object.assign(session.vehicle, correction.fields);
+          await updateSession(userId, session, env);
+          const confirmLines = Object.entries(correction.fields)
+            .filter(([k]) => k !== 'serialSource')
+            .map(([k, v]) => `• ${k}: ${v}`)
+            .join('\n');
+          await replyToMessage(
+            message.message_id,
+            JSON.stringify({ text: `✅ Updated:\n${confirmLines}` }),
+            'text',
+            env,
+          );
+          return;
+        }
+      }
+
       const text = (content.text ?? '').trim();
+      const ctx = { message, userId, chatId, content, env };
       if (text.startsWith('/') || COMMAND_KEYWORDS.has(text)) {
         await handleCommand({ text, userId, chatId, env });
       } else {

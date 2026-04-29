@@ -1,6 +1,6 @@
 import { sleep } from './retry.js';
 
-const LOCK_TTL_SEC = 50;
+const LOCK_TTL_SEC = 60;
 const POLL_MS = 700;
 const TIMEOUT_MS = 45000;
 

@@ -1,10 +1,8 @@
-import { getToken, downloadImage, sendMessage, sendCard } from '../services/lark.js';
+import { getToken, downloadImage, sendMessage, replyToMessage, replyCardToMessage } from '../services/lark.js';
 import { analyzeImageWithClaude, extractNameplateData } from '../services/claude.js';
-import { getSession, updateSession } from '../services/session.js';
+import { updateSession } from '../services/session.js';
 import { detectVehicleType, CHECK_KEYWORDS } from '../data/checklists.js';
-import { withUserQueue } from '../utils/userQueue.js';
 
-// 判断图片分析结果覆盖了哪些检查项
 function inferCoveredChecks(analysisText) {
   const lower = analysisText.toLowerCase();
   const covered = [];
@@ -16,7 +14,6 @@ function inferCoveredChecks(analysisText) {
   return covered;
 }
 
-// 判断是否是铭牌图片
 function likelyNameplate(analysisText) {
   const lower = analysisText.toLowerCase();
   return (
@@ -31,119 +28,119 @@ function likelyNameplate(analysisText) {
   );
 }
 
-export async function handleImageMessage({ message, userId, chatId, content, env }) {
-  const imageKey = content.image_key;
-  if (!imageKey) return;
-
-  await sendMessage(chatId, '🔍 Analysing image...', env);
+export async function analyzeImage(imageKey, messageId, session, userId, env) {
+  await replyToMessage(messageId, JSON.stringify({ text: '🔍 Analysing image...' }), 'text', env);
 
   try {
-    // Download before the queue lock (no session state involved)
     const token = await getToken(env);
-    const imageData = await downloadImage(message.message_id, imageKey, token, env);
+    const imageData = await downloadImage(messageId, imageKey, token, env);
 
-    // 主分析 (outside lock — pure Claude call, no session writes)
     const analysis = await analyzeImageWithClaude(imageData, env);
 
-    // Nameplate extraction if needed (also outside lock)
     let nameplateData = null;
     if (likelyNameplate(analysis)) {
       nameplateData = await extractNameplateData(imageData, env);
     }
 
-    // All session reads + writes inside the queue lock
-    await withUserQueue(env.REPORT_SESSIONS, userId, async () => {
-      const session = await getSession(userId, env);
+    // ── Nameplate / vehicle info merge ────────────────────────────────────────
+    if (nameplateData && nameplateData.model) {
+      const incoming = nameplateData.vehicle || nameplateData;
+      const incomingIsNameplate = true; // this path is always from a nameplate extraction
 
-      // ── Nameplate / vehicle info merge ────────────────────────────────────
-      if (nameplateData && nameplateData.model) {
-        const parsed = nameplateData;
-        const incoming = parsed.vehicle || parsed; // flat response from PROMPT_DETECT_VEHICLE
-        const incomingIsNameplate = parsed.imageType === 'NAMEPLATE' || true; // nameplate path always true here
+      if (!session.vehicle) session.vehicle = {};
 
-        if (!session.vehicle) session.vehicle = {};
+      if (incoming.serial) {
+        const existingIsNameplate = session.vehicle.serialSource === 'NAMEPLATE';
 
-        // Serial number priority logic
-        if (incoming.serial) {
-          const existingIsNameplate = session.vehicle.serialSource === 'NAMEPLATE';
-
-          if (!session.vehicle.serial) {
-            session.vehicle.serial = incoming.serial;
-            session.vehicle.serialSource = incomingIsNameplate ? 'NAMEPLATE' : 'CERT';
-          } else if (incomingIsNameplate && !existingIsNameplate) {
-            const old = session.vehicle.serial;
-            session.vehicle.serial = incoming.serial;
-            session.vehicle.serialSource = 'NAMEPLATE';
-            parsed.flags = parsed.flags || [];
-            parsed.flags.push(`Serial updated to nameplate value: ${incoming.serial} (replaced cert value: ${old})`);
-          } else if (!incomingIsNameplate && existingIsNameplate && incoming.serial !== session.vehicle.serial) {
-            parsed.flags = parsed.flags || [];
-            parsed.flags.push(`Cert serial (${incoming.serial}) differs from nameplate serial (${session.vehicle.serial}) — nameplate retained`);
-          }
-        }
-
-        // Merge other fields — nameplate values never overwritten by cert
-        if (incoming.model && !session.vehicle.model) session.vehicle.model = incoming.model;
-        if (incoming.voltage && !session.vehicle.voltage) session.vehicle.voltage = incoming.voltage;
-        if (incoming.capacity_kg && !session.vehicle.capacity) session.vehicle.capacity = incoming.capacity_kg;
-        if (incoming.year && !session.vehicle.year) session.vehicle.year = incoming.year;
-        if (incoming.chassisNo) session.vehicle.chassisNo = incoming.chassisNo;
-
-        // Derive vehicle type
-        if (!session.vehicle.type || session.vehicle.type === 'UNKNOWN') {
-          session.vehicle.type = detectVehicleType(incoming.model) !== 'UNKNOWN'
-            ? detectVehicleType(incoming.model)
-            : incoming.vehicle_type_hint ?? 'UNKNOWN';
-        }
-
-        // confirmNeeded — park a pending prompt for the user
-        if (nameplateData.confirmNeeded && nameplateData.confirmPrompt) {
-          session.pendingConfirm = {
-            prompt: nameplateData.confirmPrompt,
-            field: 'serial',
-            timestamp: new Date().toISOString(),
-          };
+        if (!session.vehicle.serial) {
+          session.vehicle.serial = incoming.serial;
+          session.vehicle.serialSource = incomingIsNameplate ? 'NAMEPLATE' : 'CERT';
+        } else if (incomingIsNameplate && !existingIsNameplate) {
+          const old = session.vehicle.serial;
+          session.vehicle.serial = incoming.serial;
+          session.vehicle.serialSource = 'NAMEPLATE';
+          nameplateData.flags = nameplateData.flags || [];
+          nameplateData.flags.push(`Serial updated to nameplate value: ${incoming.serial} (replaced cert value: ${old})`);
+        } else if (!incomingIsNameplate && existingIsNameplate && incoming.serial !== session.vehicle.serial) {
+          nameplateData.flags = nameplateData.flags || [];
+          nameplateData.flags.push(`Cert serial (${incoming.serial}) differs from nameplate serial (${session.vehicle.serial}) — nameplate retained`);
         }
       }
 
-      // 记录覆盖的检查项
-      const newChecks = inferCoveredChecks(analysis);
-      for (const c of newChecks) {
-        if (!session.covered_checks.includes(c)) session.covered_checks.push(c);
+      if (incoming.model && !session.vehicle.model) session.vehicle.model = incoming.model;
+      if (incoming.voltage && !session.vehicle.voltage) session.vehicle.voltage = incoming.voltage;
+      if (incoming.capacity_kg && !session.vehicle.capacity) session.vehicle.capacity = incoming.capacity_kg;
+      if (incoming.year && !session.vehicle.year) session.vehicle.year = incoming.year;
+      if (incoming.chassisNo) session.vehicle.chassisNo = incoming.chassisNo;
+
+      if (!session.vehicle.type || session.vehicle.type === 'UNKNOWN') {
+        session.vehicle.type = detectVehicleType(incoming.model) !== 'UNKNOWN'
+          ? detectVehicleType(incoming.model)
+          : incoming.vehicle_type_hint ?? 'UNKNOWN';
       }
 
-      // 写入 item
-      session.items.push({
-        type: 'image',
-        imageKey,
-        analysis,
-        covered_checks: newChecks,
-        timestamp: new Date().toISOString(),
-      });
-
-      await updateSession(userId, session, env);
-
-      const count = session.items.length;
-      const vehicleLabel = session.vehicle?.model
-        ? `${session.vehicle.model}${session.vehicle.serial ? ' · ' + session.vehicle.serial : ''}`
-        : 'Vehicle not yet identified';
-
-      await sendCard(chatId, {
-        header: { title: `✅ Photo #${count} Analysed`, style: 'green' },
-        body: `${analysis}\n\n──────────\n🔧 ${vehicleLabel}`,
-        buttons: [
-          { label: 'Check Status', action: 'CHECKSTATUS', type: 'default' },
-          { label: 'End', action: 'END', type: 'danger' },
-        ],
-      }, env);
-
-      // Prompt user to confirm uncertain serial reading
-      if (session.pendingConfirm) {
-        await sendMessage(chatId, `⚠️ Uncertain reading — ${session.pendingConfirm.prompt}`, env);
+      if (nameplateData.confirmNeeded && nameplateData.confirmPrompt) {
+        session.pendingConfirm = {
+          prompt: nameplateData.confirmPrompt,
+          field: 'serial',
+          timestamp: new Date().toISOString(),
+        };
       }
+    }
+
+    // 记录覆盖的检查项
+    const newChecks = inferCoveredChecks(analysis);
+    for (const c of newChecks) {
+      if (!session.covered_checks.includes(c)) session.covered_checks.push(c);
+    }
+
+    session.items.push({
+      type: 'image',
+      imageKey,
+      analysis,
+      covered_checks: newChecks,
+      timestamp: new Date().toISOString(),
     });
+
+    await updateSession(userId, session, env);
+
+    const count = session.items.length;
+    const vehicleLabel = session.vehicle?.model
+      ? `${session.vehicle.model}${session.vehicle.serial ? ' · ' + session.vehicle.serial : ''}`
+      : 'Vehicle not yet identified';
+
+    const card = {
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: 'plain_text', content: `✅ Photo #${count} Analysed` },
+        template: 'green',
+      },
+      elements: [
+        {
+          tag: 'div',
+          text: { tag: 'lark_md', content: `${analysis}\n\n──────────\n🔧 ${vehicleLabel}` },
+        },
+        {
+          tag: 'action',
+          actions: [
+            { tag: 'button', text: { tag: 'plain_text', content: 'Check Status' }, type: 'default', value: { action: 'CHECKSTATUS' } },
+            { tag: 'button', text: { tag: 'plain_text', content: 'End' }, type: 'danger', value: { action: 'END' } },
+          ],
+        },
+      ],
+    };
+    await replyCardToMessage(messageId, card, env);
+
+    if (session.pendingConfirm) {
+      await replyToMessage(
+        messageId,
+        JSON.stringify({ text: `⚠️ Uncertain reading — ${session.pendingConfirm.prompt}` }),
+        'text',
+        env,
+      );
+    }
   } catch (e) {
     console.error('Image analysis error:', e);
-    await sendMessage(chatId, `❌ Analysis failed: ${e.message}`, env);
+    await replyToMessage(messageId, JSON.stringify({ text: `❌ Analysis failed: ${e.message}` }), 'text', env);
   }
 }

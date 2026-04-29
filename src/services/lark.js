@@ -111,3 +111,39 @@ export async function sendCard(chatId, { header, body, buttons = [] }, env) {
   if (data.code !== 0) console.error('sendCard failed:', data);
   return data;
 }
+
+// ─── Reply to Message ─────────────────────────────────────────────────────────
+
+export async function replyToMessage(messageId, content, msgType = 'text', env) {
+  const token = await getToken(env);
+  const url = `${env.LARK_API_URL}/im/v1/messages/${messageId}/reply`;
+
+  const body = {
+    content: typeof content === 'string' ? content : JSON.stringify(content),
+    msg_type: msgType,
+  };
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = await resp.json();
+  if (data.code !== 0) {
+    console.error('[lark] replyToMessage failed:', JSON.stringify(data));
+  }
+  return data;
+}
+
+export async function replyCardToMessage(messageId, card, env) {
+  return replyToMessage(
+    messageId,
+    typeof card === 'string' ? card : JSON.stringify(card),
+    'interactive',
+    env,
+  );
+}
