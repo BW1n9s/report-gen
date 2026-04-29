@@ -1,3 +1,5 @@
+import { withRetry } from '../utils/retry.js';
+
 // ─── System Prompts ───────────────────────────────────────────────────────────
 
 export const PROMPT_IMAGE = `You are a DJJ Equipment service technician assistant specialising in Hangcha forklifts, LGMA wheel loaders, and related industrial vehicles (electric forklifts, walkie stackers, pallet jacks, skid steers).
@@ -56,7 +58,10 @@ export const PROMPT_DETECT_VEHICLE = `You are reading a Hangcha or DJJ Equipment
   "year": "YYYY or YYYY-MM or null",
   "voltage": number or null,
   "brand": "HANGCHA or LGMA or other or null",
-  "vehicle_type_hint": "ICE_FORKLIFT or ELECTRIC_FORKLIFT or WALKIE or WHEEL_LOADER or SKID_STEER or UNKNOWN"
+  "vehicle_type_hint": "ICE_FORKLIFT or ELECTRIC_FORKLIFT or WALKIE or WHEEL_LOADER or SKID_STEER or UNKNOWN",
+  "confirmNeeded": boolean,
+  "confirmPrompt": "question to ask user if confirmNeeded is true, else null",
+  "flags": []
 }
 
 vehicle_type_hint rules:
@@ -64,7 +69,24 @@ vehicle_type_hint rules:
 - If model starts with CPCD, CPQYD, CPYD → ICE_FORKLIFT
 - If model starts with LM, ZL → WHEEL_LOADER
 - If it says "ELECTRIC" or has a Voltage field → ELECTRIC_FORKLIFT
-- If it says "INTERNAL COMBUSTION" → ICE_FORKLIFT`;
+- If it says "INTERNAL COMBUSTION" → ICE_FORKLIFT
+
+## SERIAL NUMBER — STRICT RULES
+The vehicle Serial Number is ONLY taken from the "SERIAL NO." field on the metal nameplate.
+
+Other numbers you may see and how to handle them:
+- Chassis/frame number (车架编号, format: XCISD…, ~20 chars): IGNORE — do not store as serial
+- Battery component number on conformity cert (合格证): use ONLY to cross-check nameplate serial
+
+Cross-check logic:
+- If nameplate serial and cert battery number differ by 1–2 characters, flag as likely OCR/glare misread
+- Always keep the nameplate value; note the discrepancy in flags[]
+- Example: nameplate=36BE01543, cert=33BE01543 → serial=36BE01543, flag="cert digit may be OCR misread (3→6)"
+
+Uncertain digits (glare/blur/reflection):
+- Mark uncertain characters with [?] — e.g. "3[6?3]BE01543"
+- Set confirmNeeded=true and write a confirmPrompt asking the user to verify
+- Do NOT silently guess`;
 
 export const PROMPT_REPORT_PD = `You are generating a DJJ Equipment Pre-Delivery Inspection (PD) report. Format it as a clean internal record.
 
@@ -99,27 +121,31 @@ Use English. Concise engineering language.`;
 // ─── API Call Helper ──────────────────────────────────────────────────────────
 
 async function callClaude(env, systemPrompt, userContent, maxTokens = 1024) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userContent }],
-    }),
+  const payload = {
+    model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
+    max_tokens: maxTokens,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userContent }],
+  };
+
+  const data = await withRetry(async () => {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(payload),
+    });
+    if (response.status === 429) return response;
+    if (!response.ok) {
+      const errText = await response.text();
+      throw Object.assign(new Error(`Claude API error ${response.status}: ${errText}`), { status: response.status });
+    }
+    return response.json();
   });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Claude API ${response.status}: ${err}`);
-  }
-
-  const data = await response.json();
   return data.content[0].text;
 }
 
