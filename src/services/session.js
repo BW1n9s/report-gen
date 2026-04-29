@@ -1,13 +1,12 @@
 const PREFIX = 'session:';
-const TTL = 24 * 60 * 60; // 24 小时
+const TTL = 24 * 60 * 60;
 
 export async function getSession(userId, env) {
   const raw = await env.REPORT_SESSIONS.get(PREFIX + userId);
   if (raw) return JSON.parse(raw);
-
-  // 首次创建
   return {
     user_id: userId,
+    report_type: null,   // 'PD' | 'SERVICE' | null
     status: 'collecting',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),

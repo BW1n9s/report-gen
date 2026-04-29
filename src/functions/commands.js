@@ -1,31 +1,123 @@
-import { sendMessage } from '../services/lark.js';
+import { sendMessage, sendCard } from '../services/lark.js';
 import { getSession, clearSession } from '../services/session.js';
 import { generateReport } from './generateReport.js';
 
+// 报告类型配置 — 未来可在此添加更多类型或用户自定义模板
+const REPORT_TYPES = {
+  PD: {
+    label: '发车前检查 (PD)',
+    description: '检查车辆出发前的各项状态',
+  },
+  SERVICE: {
+    label: '外出保养 (Service)',
+    description: '记录外出保养的操作和结果',
+  },
+};
+
 export async function handleCommand({ text, userId, chatId, env }) {
-  const cmd = text.split(' ')[0].toLowerCase();
+  const cmd = text.trim().toUpperCase();
 
   switch (cmd) {
-    case '/报告':
-      await cmdReport({ userId, chatId, env });
+    case 'START':
+    case '/开始':
+      await cmdStart({ userId, chatId, env });
       break;
+    case 'PD':
+      await cmdSetType({ userId, chatId, type: 'PD', env });
+      break;
+    case 'SERVICE':
+      await cmdSetType({ userId, chatId, type: 'SERVICE', env });
+      break;
+    case 'CHECKSTATUS':
     case '/状态':
       await cmdStatus({ userId, chatId, env });
       break;
+    case 'END':
+    case '/报告':
+      await cmdEnd({ userId, chatId, env });
+      break;
     case '/清除':
       await clearSession(userId, env);
-      await sendMessage(chatId, '✅ 当前记录已清除，可以开始新一轮巡检。', env);
+      await sendMessage(chatId, '✅ 当前记录已清除。', env);
       break;
     default:
-      await sendMessage(
-        chatId,
-        '❓ 可用指令：\n/报告 — 生成本次巡检报告\n/状态 — 查看当前记录条数\n/清除 — 清除当前记录',
-        env,
-      );
+      await sendMessage(chatId, '❓ 发送图片或文字开始巡检，或发送 /开始 选择检查类型。', env);
   }
 }
 
-async function cmdReport({ userId, chatId, env }) {
+// 发送类型选择卡片
+async function cmdStart({ userId, chatId, env }) {
+  const session = await getSession(userId, env);
+  if (session.items.length > 0) {
+    await sendMessage(
+      chatId,
+      `⚠️ 你有一个进行中的 ${REPORT_TYPES[session.report_type]?.label ?? session.report_type} 记录（共 ${session.items.length} 条）。\n发送 END 完成报告，或 /清除 放弃当前记录。`,
+      env,
+    );
+    return;
+  }
+
+  await sendCard(chatId, {
+    header: { title: '📋 新建巡检记录', style: 'blue' },
+    body: '请选择本次检查类型：',
+    buttons: [
+      { label: '发车前检查 (PD)', action: 'PD', type: 'primary' },
+      { label: '外出保养 (Service)', action: 'SERVICE', type: 'default' },
+    ],
+  }, env);
+}
+
+// 设置报告类型并正式开始
+async function cmdSetType({ userId, chatId, type, env }) {
+  const session = await getSession(userId, env);
+  session.report_type = type;
+  const { updateSession } = await import('../services/session.js');
+  await updateSession(userId, session, env);
+
+  const typeInfo = REPORT_TYPES[type];
+  await sendCard(chatId, {
+    header: { title: `✅ 已开始：${typeInfo.label}`, style: 'green' },
+    body: `${typeInfo.description}\n\n现在可以发送图片或文字记录，完成后发送 END 生成报告。`,
+    buttons: [
+      { label: '检查占用', action: 'CHECKSTATUS', type: 'default' },
+      { label: '结束', action: 'END', type: 'danger' },
+    ],
+  }, env);
+}
+
+// 检查当前是否有进行中的 report
+async function cmdStatus({ userId, chatId, env }) {
+  const session = await getSession(userId, env);
+
+  if (session.items.length === 0 && !session.report_type) {
+    await sendCard(chatId, {
+      header: { title: '📭 当前没有进行中的记录', style: 'grey' },
+      body: '点击下方按钮开始新的巡检。',
+      buttons: [
+        { label: '发车前检查 (PD)', action: 'PD', type: 'primary' },
+        { label: '外出保养 (Service)', action: 'SERVICE', type: 'default' },
+      ],
+    }, env);
+    return;
+  }
+
+  const images = session.items.filter((i) => i.type === 'image').length;
+  const texts = session.items.filter((i) => i.type === 'text').length;
+  const since = new Date(session.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+  const typeLabel = REPORT_TYPES[session.report_type]?.label ?? session.report_type ?? '未分类';
+
+  await sendCard(chatId, {
+    header: { title: `📋 进行中：${typeLabel}`, style: 'yellow' },
+    body: `图片：${images} 张　文字：${texts} 条\n开始时间：${since}\n\n继续发送内容，或点击结束生成报告。`,
+    buttons: [
+      { label: '检查占用', action: 'CHECKSTATUS', type: 'default' },
+      { label: '结束', action: 'END', type: 'danger' },
+    ],
+  }, env);
+}
+
+// 生成报告并结束 session
+async function cmdEnd({ userId, chatId, env }) {
   const session = await getSession(userId, env);
 
   if (session.items.length === 0) {
@@ -33,7 +125,8 @@ async function cmdReport({ userId, chatId, env }) {
     return;
   }
 
-  await sendMessage(chatId, `📝 正在生成报告（共 ${session.items.length} 条记录）…`, env);
+  const typeLabel = REPORT_TYPES[session.report_type]?.label ?? session.report_type ?? '巡检';
+  await sendMessage(chatId, `📝 正在生成 ${typeLabel} 报告（共 ${session.items.length} 条记录）…`, env);
 
   try {
     const report = await generateReport(session, env);
@@ -43,23 +136,4 @@ async function cmdReport({ userId, chatId, env }) {
     console.error('Generate report error:', e);
     await sendMessage(chatId, `❌ 报告生成失败：${e.message}`, env);
   }
-}
-
-async function cmdStatus({ userId, chatId, env }) {
-  const session = await getSession(userId, env);
-
-  if (session.items.length === 0) {
-    await sendMessage(chatId, '📭 当前没有待整理的记录。', env);
-    return;
-  }
-
-  const images = session.items.filter((i) => i.type === 'image').length;
-  const texts = session.items.filter((i) => i.type === 'text').length;
-  const since = new Date(session.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-
-  await sendMessage(
-    chatId,
-    `📋 当前记录：图片 ${images} 张，文字 ${texts} 条\n开始时间：${since}\n\n发送 /报告 生成巡检报告`,
-    env,
-  );
 }

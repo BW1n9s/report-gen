@@ -74,7 +74,7 @@ export async function analyzeTextWithClaude(text, env) {
   return callClaude(env, PROMPT_TEXT, text);
 }
 
-export async function generateReportWithClaude(summaries, datetime, env) {
-  const prompt = `巡检时间：${datetime}\n\n以下是本次巡检的所有记录，请整理成报告：\n\n${summaries}`;
+export async function generateReportWithClaude(summaries, datetime, typeLabel, env) {
+  const prompt = `检查类型：${typeLabel}\n巡检时间：${datetime}\n\n以下是本次巡检的所有记录，请整理成报告：\n\n${summaries}`;
   return callClaude(env, PROMPT_REPORT, prompt);
 }

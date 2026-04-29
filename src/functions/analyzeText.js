@@ -1,4 +1,4 @@
-import { sendMessage } from '../services/lark.js';
+import { sendMessage, sendCard } from '../services/lark.js';
 import { analyzeTextWithClaude } from '../services/claude.js';
 import { getSession, updateSession } from '../services/session.js';
 
@@ -19,11 +19,17 @@ export async function handleTextMessage({ userId, chatId, content, env }) {
     await updateSession(userId, session, env);
 
     const count = session.items.length;
-    await sendMessage(
-      chatId,
-      `✅ 记录 #${count} 已解析\n\n${analysis}\n\n──────────\n继续发送内容，或发送 /报告 生成巡检报告`,
-      env,
-    );
+
+    // 引用用户原文 + 显示解析结果
+    await sendCard(chatId, {
+      header: { title: `✅ 记录 #${count} 已解析`, style: 'green' },
+      // 原文引用 + 解析结果
+      body: `💬 原文：\n"${text}"\n\n📋 解析结果：\n${analysis}`,
+      buttons: [
+        { label: '检查占用', action: 'CHECKSTATUS', type: 'default' },
+        { label: '结束', action: 'END', type: 'danger' },
+      ],
+    }, env);
   } catch (e) {
     console.error('Text analysis error:', e);
     await sendMessage(chatId, `❌ 文字解析失败：${e.message}`, env);
