@@ -15,11 +15,20 @@ const REPORT_TYPES = {
 };
 
 export async function handleCommand({ text, userId, chatId, env }) {
-  const cmd = text.trim().toUpperCase();
+  const cmd = text.trim();
 
-  switch (cmd) {
+  // 中文菜单文字 → 统一映射到英文指令
+  const normalized = {
+    '开始': 'START', '/开始': 'START',
+    '检查占用': 'CHECKSTATUS', '/状态': 'CHECKSTATUS',
+    '结束': 'END', '/报告': 'END',
+    '/清除': 'CLEAR',
+    'PD': 'PD',
+    'SERVICE': 'SERVICE',
+  }[cmd] ?? cmd.toUpperCase();
+
+  switch (normalized) {
     case 'START':
-    case '/开始':
       await cmdStart({ userId, chatId, env });
       break;
     case 'PD':
@@ -29,19 +38,17 @@ export async function handleCommand({ text, userId, chatId, env }) {
       await cmdSetType({ userId, chatId, type: 'SERVICE', env });
       break;
     case 'CHECKSTATUS':
-    case '/状态':
       await cmdStatus({ userId, chatId, env });
       break;
     case 'END':
-    case '/报告':
       await cmdEnd({ userId, chatId, env });
       break;
-    case '/清除':
+    case 'CLEAR':
       await clearSession(userId, env);
       await sendMessage(chatId, '✅ 当前记录已清除。', env);
       break;
     default:
-      await sendMessage(chatId, '❓ 发送图片或文字开始巡检，或发送 /开始 选择检查类型。', env);
+      await sendMessage(chatId, '❓ 请发送图片或文字开始巡检，或点击菜单选择操作。', env);
   }
 }
 

@@ -2,6 +2,13 @@ import { handleImageMessage } from './functions/analyzeImage.js';
 import { handleTextMessage } from './functions/analyzeText.js';
 import { handleCommand } from './functions/commands.js';
 
+// 所有应该被识别为指令的关键词（菜单按钮发送的文字 + 斜杠指令）
+const COMMAND_KEYWORDS = new Set([
+  'START', 'CHECKSTATUS', 'END',
+  '开始', '检查占用', '结束',
+  'PD', 'SERVICE',
+]);
+
 export async function routeMessage(event, env) {
   try {
     if (event.header?.event_type !== 'im.message.receive_v1') return;
@@ -21,8 +28,7 @@ export async function routeMessage(event, env) {
       await handleImageMessage(ctx);
     } else if (messageType === 'text') {
       const text = (content.text ?? '').trim();
-      // 处理按钮触发的关键词和斜杠指令
-      if (text.startsWith('/') || text === 'CHECKSTATUS' || text === 'END') {
+      if (text.startsWith('/') || COMMAND_KEYWORDS.has(text)) {
         await handleCommand({ text, userId, chatId, env });
       } else {
         await handleTextMessage(ctx);
@@ -33,7 +39,6 @@ export async function routeMessage(event, env) {
   }
 }
 
-// 处理卡片按钮点击
 export async function routeCardAction(event, env) {
   try {
     const action = event.event?.action?.value?.action;
