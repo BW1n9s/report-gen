@@ -1,229 +1,134 @@
- 一、核心目标：
+# PD助手 · Lark 工业设备巡检 Bot
 
-在 Lark 聊天里，通过图片 + 人工补充，自动生成结构化 PD / Service Report，并输出为 Lark 文档（含图片）
-🧩 二、完整用户流程
-1️⃣ 启动
-用户输入：开始 / start
-↓
-bot回复：选择 PD Report / Service Report（按钮）
+> 巡检员只需发送图片或文字，Bot 自动完成识别、分析、归档和报告生成。
 
-2️⃣ 创建 session
-用户点击：PD 或 Service
-↓
-bot：
-✔ 创建 session
-✔ 状态 = collecting
-✔ 提示可以发送图片
+---
 
-3️⃣ 图片输入（核心）
-用户发送图片（顺序乱）
-↓
-bot：
-✔ 调 Gemini 识别
-✔ 提取：
-   - model
-   - vin / serial
-   - hours
-   - 内容描述
-✔ 回复识别结果（引用图片）
-✔ 写入 session
+## 架构概览
 
-4️⃣ 人工补充（随时）
-用户输入文字（details / correction）
-
-例如：
-- "这个是mast有漏油"
-- "vin是xxx写错了"
-
-↓
-bot：
-✔ 记录 notes
-✔ 不打断流程
-
-5️⃣ 结束流程
-用户输入：end / 结束
-↓
-bot：
-✔ 检查关键字段：
-   - model
-   - vin / serial
-   - hours
-
-6️⃣ 缺失检查 + 确认
-情况 A：缺字段
-bot：
-缺失：
-- model
-- hours
-
-是否继续生成？
-[确认生成] [继续补充] [取消]
-
-情况 B：完整
-bot：
-信息完整，是否生成？
-[确认生成]
-
-7️⃣ 生成文档（关键产物）
-bot：
-✔ 创建 Lark Doc
-✔ 插入内容：
-   - header
-   - machine info
-   - notes
-   - 图片（按顺序）
-   - 每张图片对应识别描述
-   - 自动生成 report draft
-
-8️⃣ 输出
-bot：
-Report 已生成
-链接: https://...
-
-🧱 三、数据结构（必须统一）
-session（KV 里存）
-
-{
-  report_type: "PD" | "Service",
-  status: "collecting" | "confirming",
-
-  extracted: {
-    model: "",
-    vin: "",
-    serial_no: "",
-    hours: "",
-    date: ""
-  },
-
-  images: [
-    {
-      imageKey,
-      result,          // Gemini原始识别
-      parsed: {
-        model,
-        vin,
-        hours
-      }
-    }
-  ],
-
-  notes: [
-    {
-      text,
-      timestamp
-    }
-  ]
-}
-
-🔍 四、AI识别要求（Gemini）
-必须输出结构化信息：
-
-
-{
-  "type": "nameplate / dashboard / part",
-  "model": "",
-  "vin": "",
-  "serial_no": "",
-  "hours": "",
-  "description": ""
-}
-
-规则：
-
-
-不确定 → 留空
-
-不允许编造
-
-优先铭牌 > 仪表 > 其他
-📄 五、生成的文档结构
-Title:
-PD Report_CAT_123ABC_2026-04-24
-
---------------------------------
-
-Machine Info
-Model:
-VIN:
-Hours:
-
---------------------------------
-
-User Notes
-1. xxx
-2. xxx
-
---------------------------------
-
-Photos
-
-Photo 1
-[图片]
-识别说明：
-xxx
-
-Photo 2
-[图片]
-识别说明：
-xxx
-
---------------------------------
-
-Final Report（自动生成）
-
-Machine was inspected...
-
-⚙️ 六、系统架构
+```
 Lark Bot
-   ↓ webhook
-Cloudflare Worker
-   ↓
-KV（session）
-   ↓
-Gemini API（识别）
-   ↓
-Lark API（消息 / 文档）
+  └─ 发消息 → Cloudflare Worker
+                  ├─ Claude API（图片识别 / 文字解析 / 报告生成）
+                  ├─ Cloudflare KV（session 临时存储）
+                  └─ 回复 Lark 消息
+```
 
-⚠️ 七、关键难点
-1. 图片处理
-
-base64 会爆栈
-
-CF 有 10ms CPU 限制 → 要 chunk
-2. session 丢失
-
-user_id 不稳定 ❌
-
-chat_id ✅
-3. doc 插图
-必须走：
-
-upload media → 拿 token → 插入 block
-
-4. Gemini 不稳定输出
-必须：
-
-
-强制 JSON
-
-做 fallback
-5. free tier 限制
-CPU时间
-请求大小
-KV读写延迟
-
-所以：
-
-
-不要一次处理太多图
-
-不要存大图（只存 key）
-
-
-八、结构：
+```
 src/
-├── index.js          # 入口文件：处理 Webhook 分发与解密
-├── session.js        # 会话管理：封装 KV 读写逻辑
-├── ai.js             # AI 逻辑：封装 Gemini 识别与 Prompt
-├── lark.js           # 飞书 API：封装消息发送、图片下载、文档创建
-└── utils.js          # 工具函数：加密解密、Buffer 转换
+  index.js                 # 入口：解密、去重、路由
+  router.js                # 消息类型判断，分发到对应函数
+  functions/
+    analyzeImage.js        # 图片识别
+    analyzeText.js         # 文字解析
+    commands.js            # 指令处理（/报告 /状态 /清除）
+    generateReport.js      # 汇总生成巡检报告
+  services/
+    claude.js              # Claude API 封装
+    lark.js                # Lark API 封装（token / 下载 / 发送）
+    session.js             # KV 读写
+  utils/
+    crypto.js              # Lark 事件解密（AES-256-CBC）
+```
+
+---
+
+## 使用方式
+
+| 操作 | Bot 响应 |
+|------|---------|
+| 发送图片 | 识别设备类型、读取参数、标注异常 |
+| 发送文字 | 结构化解析，提取设备名、状态、问题描述 |
+| 图片 + 文字混发 | 合并为一条完整记录 |
+| `/报告` | 汇总本次所有记录，生成巡检日报 |
+| `/状态` | 查看当前记录条数和开始时间 |
+| `/清除` | 清空当前记录，开始新一轮巡检 |
+
+---
+
+## 环境变量
+
+在 Cloudflare Dashboard → Workers → lark-report-bot → Settings → Variables and Secrets 中配置：
+
+| 类型 | 名称 | 说明 |
+|------|------|------|
+| Secret | `ANTHROPIC_API_KEY` | Claude API Key |
+| Secret | `FEISHU_APP_ID` | Lark 应用 App ID |
+| Secret | `FEISHU_APP_SECRET` | Lark 应用 App Secret |
+| Secret | `FEISHU_ENCRYPT_KEY` | Lark 事件加密 Key |
+| Secret | `FEISHU_VERIFICATION_TOKEN` | Lark 事件验证 Token |
+| Plaintext | `CLAUDE_MODEL` | `claude-sonnet-4-6` |
+| Plaintext | `LARK_API_URL` | `https://open.feishu.cn/open-apis` |
+
+> Secrets 不写入 `wrangler.toml`，只在 Dashboard 中维护。
+
+---
+
+## 本地开发
+
+```bash
+npm install
+npx wrangler dev
+```
+
+## 部署
+
+推送到 `main` 分支后 Cloudflare 自动部署，或手动执行：
+
+```bash
+npx wrangler deploy
+```
+
+---
+
+## 扩展新功能
+
+每个功能是独立的函数文件，添加新能力只需两步：
+
+**1. 在 `src/functions/` 新建函数文件**
+
+```js
+// src/functions/myNewFeature.js
+export async function handleMyFeature({ userId, chatId, content, env }) {
+  // 实现逻辑
+}
+```
+
+**2. 在 `src/router.js` 注册路由**
+
+```js
+import { handleMyFeature } from './functions/myNewFeature.js';
+
+// 在 routeMessage 中添加判断
+if (messageType === 'my_type') {
+  await handleMyFeature(ctx);
+}
+```
+
+---
+
+## Lark 开发者后台配置
+
+- **事件订阅**：`im.message.receive_v1`
+- **回调**：`card.action.trigger`
+- **Webhook URL**：`https://lark-report-bot.john-wang-9f9.workers.dev`
+- **权限**：`im:message`、`im:resource`、`im:message:send_as_bot`、`docx:document`
+
+---
+
+## Session 机制
+
+每个用户有一个独立的 KV session，TTL 24 小时。用户可在一次巡检中多次发送图片和文字，Bot 会累积收集，直到用户发送 `/报告` 后汇总生成并自动清除 session。
+
+```json
+{
+  "user_id": "ou_xxxxxx",
+  "status": "collecting",
+  "created_at": "2026-04-29T10:00:00.000Z",
+  "updated_at": "2026-04-29T10:05:00.000Z",
+  "items": [
+    { "type": "image", "imageKey": "...", "analysis": "...", "timestamp": "..." },
+    { "type": "text",  "original": "...", "analysis": "...", "timestamp": "..." }
+  ]
+}
+```

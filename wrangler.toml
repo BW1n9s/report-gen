@@ -1,8 +1,7 @@
-
 name = "lark-report-bot"
 main = "src/index.js"
 compatibility_date = "2026-04-24"
-compatibility_flags = [ "nodejs_compat" ]
+compatibility_flags = ["nodejs_compat"]
 
 [observability]
 enabled = false
@@ -24,5 +23,5 @@ binding = "REPORT_SESSIONS"
 id = "d68d367f9db54e5f8c5067c3cca0077b"
 
 [vars]
-GEMINI_MODEL = "gemini-2.5-flash"
 LARK_API_URL = "https://open.feishu.cn/open-apis"
+CLAUDE_MODEL = "claude-sonnet-4-6"
