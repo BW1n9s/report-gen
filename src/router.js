@@ -2,7 +2,6 @@ import { handleImageMessage } from './functions/analyzeImage.js';
 import { handleTextMessage } from './functions/analyzeText.js';
 import { handleCommand } from './functions/commands.js';
 
-// 所有应该被识别为指令的关键词（菜单按钮发送的文字 + 斜杠指令）
 const COMMAND_KEYWORDS = new Set([
   'START', 'CHECKSTATUS', 'END',
   '开始', '检查占用', '结束',
@@ -41,10 +40,17 @@ export async function routeMessage(event, env) {
 
 export async function routeCardAction(event, env) {
   try {
-    const action = event.event?.action?.value?.action;
-    const userId = event.event?.operator?.open_id;
-    const chatId = event.event?.context?.open_chat_id;
-    if (!action || !userId || !chatId) return;
+    const e = event.event ?? {};
+    const action = e.action?.value?.action;
+    const chatId = e.context?.open_chat_id;
+    const userId = e.operator?.open_id;
+
+    console.log('[CardAction] action:', action, 'userId:', userId, 'chatId:', chatId);
+
+    if (!action || !userId || !chatId) {
+      console.warn('[CardAction] missing required fields', { action, userId, chatId });
+      return;
+    }
 
     await handleCommand({ text: action, userId, chatId, env });
   } catch (e) {
