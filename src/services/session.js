@@ -6,11 +6,22 @@ export async function getSession(userId, env) {
   if (raw) return JSON.parse(raw);
   return {
     user_id: userId,
-    report_type: null,   // 'PD' | 'SERVICE' | null
+    report_type: null,       // 'PD' | 'SERVICE'
     status: 'collecting',
+    // 车辆信息（从铭牌图片提取）
+    vehicle: {
+      type: null,            // 'FORKLIFT_ICE' | 'FORKLIFT_ELECTRIC' | 'FORKLIFT_WALKIE' | 'WHEEL_LOADER' | 'SKID_STEER' | 'UNKNOWN'
+      model: null,
+      serial: null,
+      capacity: null,
+      year: null,
+      hours: null,
+    },
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     items: [],
+    // 记录哪些检查项已有图片证据
+    covered_checks: [],      // e.g. ['engine_oil', 'hydraulic_oil', 'battery']
   };
 }
 

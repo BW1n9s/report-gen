@@ -98,11 +98,11 @@ async function cmdStatus({ userId, chatId, env }) {
 
   if (session.items.length === 0 && !session.report_type) {
     await sendCard(chatId, {
-      header: { title: '📭 当前没有进行中的记录', style: 'grey' },
-      body: '点击下方按钮开始新的巡检。',
+      header: { title: '📭 No active record', style: 'grey' },
+      body: 'Start a new inspection below.',
       buttons: [
-        { label: '发车前检查 (PD)', action: 'PD', type: 'primary' },
-        { label: '外出保养 (Service)', action: 'SERVICE', type: 'default' },
+        { label: 'Pre-Delivery (PD)', action: 'PD', type: 'primary' },
+        { label: 'Service', action: 'SERVICE', type: 'default' },
       ],
     }, env);
     return;
@@ -110,15 +110,28 @@ async function cmdStatus({ userId, chatId, env }) {
 
   const images = session.items.filter((i) => i.type === 'image').length;
   const texts = session.items.filter((i) => i.type === 'text').length;
-  const since = new Date(session.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  const typeLabel = REPORT_TYPES[session.report_type]?.label ?? session.report_type ?? '未分类';
+  const since = new Date(session.created_at).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
+
+  const typeLabel = session.report_type === 'PD' ? 'Pre-Delivery (PD)' : 'Service';
+  const vehicleLabel = session.vehicle?.model
+    ? `${session.vehicle.model}${session.vehicle.serial ? ' · ' + session.vehicle.serial : ''}`
+    : '⚠️ Vehicle not yet identified — send a nameplate photo';
+
+  // PD 时显示检查项覆盖进度
+  let progressText = '';
+  if (session.report_type === 'PD' && session.vehicle?.type && session.vehicle.type !== 'UNKNOWN') {
+    const { getChecklistForType } = await import('../data/checklists.js');
+    const checklist = getChecklistForType(session.vehicle.type);
+    const coveredCount = checklist.filter((i) => session.covered_checks.includes(i.id)).length;
+    progressText = `\nChecklist coverage: ${coveredCount}/${checklist.length} items`;
+  }
 
   await sendCard(chatId, {
-    header: { title: `📋 进行中：${typeLabel}`, style: 'yellow' },
-    body: `图片：${images} 张　文字：${texts} 条\n开始时间：${since}\n\n继续发送内容，或点击结束生成报告。`,
+    header: { title: `📋 Active: ${typeLabel}`, style: 'yellow' },
+    body: `🔧 ${vehicleLabel}\n📷 ${images} photos　📝 ${texts} notes\nStarted: ${since}${progressText}\n\nContinue sending photos/notes, or tap End to generate report.`,
     buttons: [
-      { label: '检查占用', action: 'CHECKSTATUS', type: 'default' },
-      { label: '结束', action: 'END', type: 'danger' },
+      { label: 'Check Status', action: 'CHECKSTATUS', type: 'default' },
+      { label: 'End', action: 'END', type: 'danger' },
     ],
   }, env);
 }

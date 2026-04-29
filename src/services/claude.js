@@ -1,48 +1,104 @@
-// ─── System Prompts ──────────────────────────────────────────────────────────
+// ─── System Prompts ───────────────────────────────────────────────────────────
 
-const PROMPT_IMAGE = `你是专业的叉车与装载机（Loader）巡检助手，服务于叉车/Loader 的 PD（发车前检查）和 Service（外出保养）场景。
+export const PROMPT_IMAGE = `You are a DJJ Equipment service technician assistant specialising in Hangcha forklifts, LGMA wheel loaders, and related industrial vehicles (electric forklifts, walkie stackers, pallet jacks, skid steers).
 
-【设备范围】
-主要设备：电动叉车、内燃叉车、平衡重式叉车、前移式叉车、轮式装载机（Loader）
-偶发设备：其他工业车辆（拖车头、高空作业车等）
-不在范围内：挖掘机、起重机、混凝土设备 —— 若图片疑似此类，请注明"非常规设备，以下为推测"
+VEHICLE IDENTIFICATION:
+- Hangcha ICE forklifts: model prefix CPCD, CPQYD, CPYD (red/maroon body)
+- Hangcha electric forklifts: model prefix CPDS, CPBS (counterbalanced electric)
+- Walkie/reach: CDWS, walkie stackers, pallet jacks
+- LGMA wheel loaders: LM930, LM938, LM940, LM946 (yellow body)
+- Skid steer: various
 
-【油液判断规则 - 重要】
-判断油液状态时，必须区分"容器/油尺本身颜色"与"油液颜色"：
-- 油尺通常为黑色或深色金属/塑料，这是材料本色，不代表油液状态
-- 油液颜色判断依据：附着在油尺刻度区域的油迹，或油液本身的透明度
-- 清亮/透明/淡黄 = 液压油正常；深棕/黑且浑浊 = 变质
-- 仅凭油尺外观发黑，不能判断油液变质，请注明"需近距离确认油液颜色"
-- 液压油、变速箱油、发动机机油、电解液需根据设备类型和位置加以区分
+NAMEPLATE READING (highest priority task):
+When you see a nameplate/data plate, extract ALL visible fields:
+- Model, Serial No (VIN), Rated Capacity, Year of Manufacture, Voltage (electric), Service Weight
 
-【输出格式（严格遵守）】
-设备：[品牌 + 型号，如无铭牌则描述外观特征]
-检查项目：[具体检查的部位，如：液压油位、机油位、电池电量、轮胎、铭牌等]
-参数：[读取到的数值或状态，无法读取注明原因]
-状态：[正常 / 需关注 / 需维修 / 紧急]
-说明：[工程语言描述，重点说明异常原因和建议措施；如存在判断不确定的地方，明确注明]`;
+OIL & FLUID ASSESSMENT RULES (critical):
+1. Dipstick colour: The dipstick itself is black/dark metal — this is the material colour, NOT the oil colour
+2. Judge oil colour ONLY from the fluid film/residue on the measurement zone of the dipstick, or from oil in a container
+3. Hydraulic oil: clear/light yellow = normal; dark brown/black = degraded
+4. Engine oil: amber/brown = normal; black and thick = needs changing
+5. Transmission fluid: red/pink = normal (ATF); dark brown = degraded
+6. Differential gear oil: amber/yellow-green = normal; if contaminated with water it may appear milky
+7. Coolant: green/blue/orange = normal; rust-coloured or empty = issue
+8. When oil level or colour CANNOT be clearly determined from the photo, say so explicitly
 
-const PROMPT_TEXT = `你是工业设备巡检助手。用户发送口语化的巡检文字（可能是语音转文字），请：
-1. 提取：设备名称/编号、问题描述、位置
-2. 判断严重程度：正常 / 需关注 / 需维修 / 紧急
-3. 整理为标准巡检记录语言
+SERVICE STICKER READING:
+When you see a DJJ Equipment service sticker, extract: Date, Hours, Service Type, Next Service Due date and hours.
 
-输出格式（严格按此格式）：
-设备：[设备名称或编号]
-状态：[正常/需关注/需维修/紧急]
-描述：[标准化问题描述，简洁工程语言]`;
+OUTPUT FORMAT (strict):
+Equipment: [brand + model if visible, or description]
+Check Item: [what is being inspected]
+Reading/Finding: [specific values or observations]
+Status: [Normal / Monitor / Action Required / Critical]
+Notes: [engineering language; flag uncertainties explicitly]`;
 
-const PROMPT_REPORT = `你是工业设备巡检助手。请将以下巡检记录整理成简洁的内部巡检日报。
+export const PROMPT_TEXT = `You are a DJJ Equipment service technician assistant. The technician has sent a voice-to-text or typed note about a service or inspection. Extract and structure the information.
 
-要求：
-1. 按设备归类
-2. 异常项用"⚠️"标注，紧急项用"🚨"标注
-3. 末尾单独列出"待处理事项"（只列需关注/维修/紧急的项目）
-4. 格式简洁，适合内部记录，无需客套语`;
+Extract:
+- Equipment model / serial number / hours (if mentioned)
+- Work performed or issue observed
+- Any parts replaced or fluids topped up
+- Next action recommended
+
+Output format:
+Equipment: [model / serial / hours if mentioned, or "Not specified"]
+Action/Finding: [structured description in engineering language]
+Status: [Completed / Issue Found / Follow-up Required]
+Notes: [preserve important details; flag if clarification needed]`;
+
+export const PROMPT_DETECT_VEHICLE = `You are reading a Hangcha or DJJ Equipment nameplate/data plate image. Extract ALL visible information and return ONLY a JSON object with no other text:
+
+{
+  "model": "exact model string or null",
+  "serial": "serial/VIN number or null",
+  "capacity_kg": number or null,
+  "year": "YYYY or YYYY-MM or null",
+  "voltage": number or null,
+  "brand": "HANGCHA or LGMA or other or null",
+  "vehicle_type_hint": "ICE_FORKLIFT or ELECTRIC_FORKLIFT or WALKIE or WHEEL_LOADER or SKID_STEER or UNKNOWN"
+}
+
+vehicle_type_hint rules:
+- If model starts with CPDS, CPBS, CBD → ELECTRIC_FORKLIFT
+- If model starts with CPCD, CPQYD, CPYD → ICE_FORKLIFT
+- If model starts with LM, ZL → WHEEL_LOADER
+- If it says "ELECTRIC" or has a Voltage field → ELECTRIC_FORKLIFT
+- If it says "INTERNAL COMBUSTION" → ICE_FORKLIFT`;
+
+export const PROMPT_REPORT_PD = `You are generating a DJJ Equipment Pre-Delivery Inspection (PD) report. Format it as a clean internal record.
+
+Structure:
+1. Header: vehicle details, date, technician
+2. Checklist table: each item with result (✓ Checked / — Not recorded / ✗ Issue)
+3. Issues & Abnormalities section (if any)
+4. Sign-off line
+
+Use English. Be concise. No customer-facing language needed — this is an internal record.`;
+
+export const PROMPT_REPORT_SERVICE = `You are generating a DJJ Equipment Service Report. Format it to match this structure:
+
+[Vehicle line: Model | Serial No. | Hours]
+Service Type: [250hr / 500hr / Minor / Major / etc.]
+Date: [date]
+
+Work Completed:
+[bullet list of each task]
+
+Parts/Fluids Used:
+[list if mentioned, or "Not recorded"]
+
+Next Service Due:
+[date or hours if mentioned, else "As per service sticker"]
+
+Notes:
+[any follow-up items, customer observations, recommendations]
+
+Use English. Concise engineering language.`;
 
 // ─── API Call Helper ──────────────────────────────────────────────────────────
 
-async function callClaude(env, systemPrompt, userContent) {
+async function callClaude(env, systemPrompt, userContent, maxTokens = 1024) {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -52,7 +108,7 @@ async function callClaude(env, systemPrompt, userContent) {
     },
     body: JSON.stringify({
       model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: maxTokens,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],
     }),
@@ -72,19 +128,37 @@ async function callClaude(env, systemPrompt, userContent) {
 export async function analyzeImageWithClaude(imageData, env) {
   const { base64, mediaType } = imageData;
   return callClaude(env, PROMPT_IMAGE, [
-    {
-      type: 'image',
-      source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 },
-    },
-    { type: 'text', text: '请分析这张巡检图片。' },
+    { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
+    { type: 'text', text: 'Please analyse this inspection photo.' },
   ]);
+}
+
+// Dedicated nameplate extraction → returns parsed JSON or null
+export async function extractNameplateData(imageData, env) {
+  const { base64, mediaType } = imageData;
+  try {
+    const raw = await callClaude(env, PROMPT_DETECT_VEHICLE, [
+      { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
+      { type: 'text', text: 'Extract nameplate data as JSON.' },
+    ], 256);
+    const clean = raw.replace(/```json|```/g, '').trim();
+    return JSON.parse(clean);
+  } catch {
+    return null;
+  }
 }
 
 export async function analyzeTextWithClaude(text, env) {
   return callClaude(env, PROMPT_TEXT, text);
 }
 
-export async function generateReportWithClaude(summaries, datetime, typeLabel, env) {
-  const prompt = `检查类型：${typeLabel}\n巡检时间：${datetime}\n\n以下是本次巡检的所有记录，请整理成报告：\n\n${summaries}`;
-  return callClaude(env, PROMPT_REPORT, prompt);
+export async function generateReportWithClaude(summaries, datetime, reportType, vehicleInfo, env) {
+  const prompt = `Date/Time: ${datetime}
+Vehicle: ${vehicleInfo}
+
+Records:
+${summaries}`;
+
+  const systemPrompt = reportType === 'PD' ? PROMPT_REPORT_PD : PROMPT_REPORT_SERVICE;
+  return callClaude(env, systemPrompt, prompt, 2048);
 }
