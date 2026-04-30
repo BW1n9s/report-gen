@@ -1,5 +1,5 @@
-const WINDOW_TTL = 6;    // seconds — images arriving within 6s = same batch
-const DATA_TTL   = 600;  // seconds — batch data kept 10 minutes
+const BATCH_WINDOW_MS = 8000;  // images arriving within 8s = same batch
+const DATA_TTL = 600;          // KV TTL in seconds (must be >= 60)
 
 async function safeGet(kv, key) {
   try { return await kv.get(key); } catch (_) { return null; }
@@ -11,19 +11,20 @@ function jitter(ms) {
 
 /**
  * Register an incoming image into the current batch window.
+ * Window detection uses a timestamp stored inside the KV value (no sub-60s TTL).
  * Returns { isNew, total, statusMsgId }
  */
 export async function registerImage(kv, userId, imageKey, messageId) {
-  const winKey  = `bwin:${userId}`;
   const dataKey = `bdat:${userId}`;
 
-  const windowExists = await safeGet(kv, winKey);
-  // Refresh the sliding window every time an image arrives
-  await kv.put(winKey, '1', { expirationTtl: WINDOW_TTL });
+  await jitter(100 + Math.random() * 150); // stagger concurrent writes
 
-  if (!windowExists) {
-    // New batch
+  const raw = await safeGet(kv, dataKey);
+
+  if (!raw) {
+    // Brand new batch
     const data = {
+      windowStart: Date.now(),
       images: [{ imageKey, messageId }],
       completed: 0,
       results: [],
@@ -31,17 +32,28 @@ export async function registerImage(kv, userId, imageKey, messageId) {
     };
     await kv.put(dataKey, JSON.stringify(data), { expirationTtl: DATA_TTL });
     return { isNew: true, total: 1, statusMsgId: null };
-  } else {
-    // Existing batch — append
-    await jitter(150); // reduce concurrent-write conflicts on KV
-    const raw = await safeGet(kv, dataKey);
-    const data = raw
-      ? JSON.parse(raw)
-      : { images: [], completed: 0, results: [], statusMsgId: null };
-    data.images.push({ imageKey, messageId });
-    await kv.put(dataKey, JSON.stringify(data), { expirationTtl: DATA_TTL });
-    return { isNew: false, total: data.images.length, statusMsgId: data.statusMsgId };
   }
+
+  const data = JSON.parse(raw);
+  const age = Date.now() - (data.windowStart || 0);
+
+  if (age > BATCH_WINDOW_MS) {
+    // Window expired — start a new batch, overwrite old data
+    const fresh = {
+      windowStart: Date.now(),
+      images: [{ imageKey, messageId }],
+      completed: 0,
+      results: [],
+      statusMsgId: null,
+    };
+    await kv.put(dataKey, JSON.stringify(fresh), { expirationTtl: DATA_TTL });
+    return { isNew: true, total: 1, statusMsgId: null };
+  }
+
+  // Within window — append to existing batch
+  data.images.push({ imageKey, messageId });
+  await kv.put(dataKey, JSON.stringify(data), { expirationTtl: DATA_TTL });
+  return { isNew: false, total: data.images.length, statusMsgId: data.statusMsgId };
 }
 
 /**
@@ -58,11 +70,11 @@ export async function setStatusMsgId(kv, userId, statusMsgId) {
 
 /**
  * Record a completed analysis result.
- * Returns { completed, total, allDone, data, statusMsgId }
+ * Returns { completed, total, allDone, statusMsgId, data } or null.
  */
 export async function addResult(kv, userId, result) {
   const dataKey = `bdat:${userId}`;
-  await jitter(200); // stagger concurrent writes
+  await jitter(100 + Math.random() * 200);
   const raw = await safeGet(kv, dataKey);
   if (!raw) return null;
   const data = JSON.parse(raw);
@@ -85,6 +97,5 @@ export async function getBatchData(kv, userId) {
 }
 
 export async function clearBatch(kv, userId) {
-  try { await kv.delete(`bwin:${userId}`); } catch (_) {}
   try { await kv.delete(`bdat:${userId}`); } catch (_) {}
 }

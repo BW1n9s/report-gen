@@ -141,62 +141,62 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       );
     }
 
-    // ── Batch tracking: report this result and check if batch is complete ──────
+    // ── Batch tracking ────────────────────────────────────────────────────────
 
     const parsed = nameplateData; // null for non-nameplate images
 
     const batchResult = {
-      imageIndex:        null,
       originalMessageId: messageId,
-      imageType:         parsed?.imageType || 'GENERAL',
-      confidence:        parsed?.confidence || 'LOW',
-      summary:           buildResultSummary(parsed),
-      flags:             parsed?.flags || [],
-      confirmNeeded:     parsed?.confirmNeeded || false,
-      vehicle:           parsed?.vehicle || null,
+      imageType:  parsed?.imageType  || 'GENERAL',
+      confidence: parsed?.confidence || 'LOW',
+      summary:    buildResultSummary(parsed),
+      flags:      parsed?.flags      || [],
+      confirmNeeded: parsed?.confirmNeeded || false,
+      confirmPrompt: parsed?.confirmPrompt || null,
+      vehicle:    parsed?.vehicle    || null,
     };
-
-    if (batchResult.flags.length > 0 || batchResult.confirmNeeded) {
-      try {
-        const flagLines = batchResult.flags.map(f => `• ${f}`).join('\n');
-        const confirmLine = batchResult.confirmNeeded
-          ? `\n⚠️ ${parsed.confirmPrompt}`
-          : '';
-        await replyToMessage(
-          messageId,
-          JSON.stringify({ text: `⚠️ Attention needed for this photo:\n${flagLines}${confirmLine}` }),
-          'text',
-          env,
-        );
-      } catch (_) {}
-    }
 
     const batchStatus = await addResult(env.REPORT_SESSIONS, userId, batchResult);
 
     if (batchStatus) {
       const { completed, total, allDone, statusMsgId, data } = batchStatus;
 
+      // Update the single rolling status message (no new messages until done)
       if (statusMsgId) {
         try {
-          await updateTextMessage(
-            statusMsgId,
-            allDone
-              ? `✅ ${completed}/${total} photos analysed — see summary below`
-              : `📸 ${completed}/${total} photos analysed, still processing...`,
-            env,
-          );
+          const statusText = allDone
+            ? `✅ ${completed}/${total} photos analysed`
+            : `📸 ${completed}/${total} photos analysed, still processing...`;
+          await updateTextMessage(statusMsgId, statusText, env);
         } catch (_) {}
       }
 
       if (allDone) {
+        // Send one summary card quoting the first image
         try {
           const summaryCard = buildBatchSummaryCard(data.results, session);
           const firstMsgId = data.images?.[0]?.messageId || messageId;
           await replyCardToMessage(firstMsgId, summaryCard, env);
-          await clearBatch(env.REPORT_SESSIONS, userId);
         } catch (e) {
           console.error('[analyzeImage] Failed to send summary card:', e);
         }
+
+        // After summary card: send individual replies ONLY for items needing confirmation
+        // This keeps the chat clean — only actionable items get their own message
+        for (const r of data.results) {
+          if (r.confirmNeeded && r.confirmPrompt) {
+            try {
+              await replyToMessage(
+                r.originalMessageId,
+                JSON.stringify({ text: `⚠️ Please confirm for this photo:\n${r.confirmPrompt}` }),
+                'text',
+                env,
+              );
+            } catch (_) {}
+          }
+        }
+
+        await clearBatch(env.REPORT_SESSIONS, userId);
       }
     }
 

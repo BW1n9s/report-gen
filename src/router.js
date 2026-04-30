@@ -30,26 +30,26 @@ export async function routeMessage(event, env) {
       const imageKey = content.image_key;
 
       try {
-        // Register this image in the current batch window
         const { isNew } = await registerImage(
           env.REPORT_SESSIONS, userId, imageKey, messageId,
         );
 
         if (isNew) {
-          // First image in this batch — send a status message
-          const statusResp = await sendMessage(chatId, '📸 Photo received — analysing...', env);
+          // First image in this batch — send ONE status message
+          const statusResp = await sendMessage(chatId, '📸 Photos received — analysing...', env);
           const newStatusMsgId = statusResp?.data?.message_id;
           if (newStatusMsgId) {
             await setStatusMsgId(env.REPORT_SESSIONS, userId, newStatusMsgId);
           }
         }
+        // Subsequent images: no message sent here — status updated in analyzeImage
 
-        // Process image — no queue, each Worker invocation handles its own image
         const session = await getSession(userId, env);
         await analyzeImage(imageKey, messageId, session, userId, env);
 
       } catch (err) {
         console.error('[router] image processing error:', err);
+        // Only send error reply if it's a real failure, not a batch-window issue
         try {
           await replyToMessage(
             messageId,
