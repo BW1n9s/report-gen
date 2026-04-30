@@ -1,9 +1,9 @@
 import { analyzeImage } from './functions/analyzeImage.js';
 import { handleTextMessage } from './functions/analyzeText.js';
 import { handleCommand } from './functions/commands.js';
-import { withUserQueue } from './utils/userQueue.js';
 import { parseCorrection } from './utils/parseCorrection.js';
-import { replyToMessage } from './services/lark.js';
+import { registerImage, setStatusMsgId } from './utils/batchTracker.js';
+import { sendMessage, replyToMessage } from './services/lark.js';
 import { getSession, updateSession } from './services/session.js';
 
 const COMMAND_KEYWORDS = new Set([
@@ -27,23 +27,33 @@ export async function routeMessage(event, env) {
 
     if (messageType === 'image') {
       const messageId = message.message_id;
-      const imageKey = JSON.parse(message.content).image_key;
-
-      // Send immediate acknowledgement
-      // (already sent "🔍 Analysing image..." before this point — keep that)
+      const imageKey = content.image_key;
 
       try {
+        // Register this image in the current batch window
+        const { isNew } = await registerImage(
+          env.REPORT_SESSIONS, userId, imageKey, messageId,
+        );
+
+        if (isNew) {
+          // First image in this batch — send a status message
+          const statusResp = await sendMessage(chatId, '📸 Photo received — analysing...', env);
+          const newStatusMsgId = statusResp?.data?.message_id;
+          if (newStatusMsgId) {
+            await setStatusMsgId(env.REPORT_SESSIONS, userId, newStatusMsgId);
+          }
+        }
+
+        // Process image — no queue, each Worker invocation handles its own image
         const session = await getSession(userId, env);
-        await withUserQueue(env.REPORT_SESSIONS, userId, async () => {
-          await analyzeImage(imageKey, messageId, session, userId, env);
-        });
+        await analyzeImage(imageKey, messageId, session, userId, env);
+
       } catch (err) {
-        console.error('[router] analyzeImage failed:', err);
-        // Always send a failure reply so user is not left hanging
+        console.error('[router] image processing error:', err);
         try {
           await replyToMessage(
             messageId,
-            JSON.stringify({ text: `❌ Analysis failed: ${err.message || 'Unknown error'}. Please resend the photo.` }),
+            JSON.stringify({ text: `❌ Failed to analyse this photo: ${err.message || 'Unknown error'}. Please resend.` }),
             'text',
             env,
           );

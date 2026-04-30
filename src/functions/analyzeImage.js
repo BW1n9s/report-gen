@@ -1,7 +1,8 @@
-import { getToken, downloadImage, sendMessage, replyToMessage, replyCardToMessage } from '../services/lark.js';
+import { getToken, downloadImage, replyToMessage, replyCardToMessage, updateTextMessage } from '../services/lark.js';
 import { analyzeImageWithClaude, extractNameplateData } from '../services/claude.js';
 import { updateSession } from '../services/session.js';
 import { detectVehicleType, CHECK_KEYWORDS } from '../data/checklists.js';
+import { addResult, clearBatch } from '../utils/batchTracker.js';
 
 function inferCoveredChecks(analysisText) {
   const lower = analysisText.toLowerCase();
@@ -45,7 +46,7 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
     // ── Nameplate / vehicle info merge ────────────────────────────────────────
     if (nameplateData && nameplateData.model) {
       const incoming = nameplateData.vehicle || nameplateData;
-      const incomingIsNameplate = true; // this path is always from a nameplate extraction
+      const incomingIsNameplate = true;
 
       if (!session.vehicle) session.vehicle = {};
 
@@ -139,8 +140,135 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
         env,
       );
     }
+
+    // ── Batch tracking: report this result and check if batch is complete ──────
+
+    const parsed = nameplateData; // null for non-nameplate images
+
+    const batchResult = {
+      imageIndex:        null,
+      originalMessageId: messageId,
+      imageType:         parsed?.imageType || 'GENERAL',
+      confidence:        parsed?.confidence || 'LOW',
+      summary:           buildResultSummary(parsed),
+      flags:             parsed?.flags || [],
+      confirmNeeded:     parsed?.confirmNeeded || false,
+      vehicle:           parsed?.vehicle || null,
+    };
+
+    if (batchResult.flags.length > 0 || batchResult.confirmNeeded) {
+      try {
+        const flagLines = batchResult.flags.map(f => `• ${f}`).join('\n');
+        const confirmLine = batchResult.confirmNeeded
+          ? `\n⚠️ ${parsed.confirmPrompt}`
+          : '';
+        await replyToMessage(
+          messageId,
+          JSON.stringify({ text: `⚠️ Attention needed for this photo:\n${flagLines}${confirmLine}` }),
+          'text',
+          env,
+        );
+      } catch (_) {}
+    }
+
+    const batchStatus = await addResult(env.REPORT_SESSIONS, userId, batchResult);
+
+    if (batchStatus) {
+      const { completed, total, allDone, statusMsgId, data } = batchStatus;
+
+      if (statusMsgId) {
+        try {
+          await updateTextMessage(
+            statusMsgId,
+            allDone
+              ? `✅ ${completed}/${total} photos analysed — see summary below`
+              : `📸 ${completed}/${total} photos analysed, still processing...`,
+            env,
+          );
+        } catch (_) {}
+      }
+
+      if (allDone) {
+        try {
+          const summaryCard = buildBatchSummaryCard(data.results, session);
+          const firstMsgId = data.images?.[0]?.messageId || messageId;
+          await replyCardToMessage(firstMsgId, summaryCard, env);
+          await clearBatch(env.REPORT_SESSIONS, userId);
+        } catch (e) {
+          console.error('[analyzeImage] Failed to send summary card:', e);
+        }
+      }
+    }
+
+    // ── End batch tracking ────────────────────────────────────────────────────
+
   } catch (e) {
     console.error('Image analysis error:', e);
     await replyToMessage(messageId, JSON.stringify({ text: `❌ Analysis failed: ${e.message}` }), 'text', env);
   }
+}
+
+function buildResultSummary(parsed) {
+  if (!parsed) return 'No result';
+  const type = parsed.imageType || 'GENERAL';
+  const findings = (parsed.findings || []).slice(0, 2).join('; ');
+  const serial = parsed.vehicle?.serial ? ` | S/N: ${parsed.vehicle.serial}` : '';
+  return `[${type}]${serial}${findings ? ' — ' + findings : ''}`;
+}
+
+function buildBatchSummaryCard(results, session) {
+  const vehicle = session?.vehicle;
+  const vehicleLine = vehicle?.serial
+    ? `${vehicle.model || 'Unknown model'} | S/N: ${vehicle.serial}${vehicle.serialSource ? ` (source: ${vehicle.serialSource})` : ''}`
+    : '⚠️ Vehicle not yet identified';
+
+  const allFlags = results.flatMap((r, i) =>
+    (r.flags || []).map(f => `Photo ${i + 1}: ${f}`),
+  );
+
+  const resultElements = results.map((r, i) => ({
+    tag: 'div',
+    text: {
+      tag: 'lark_md',
+      content: `**📷 Photo ${i + 1}** *(${r.imageType})*\n${r.summary}${r.confirmNeeded ? '\n⚠️ *Confirmation needed — see individual reply above*' : ''}`,
+    },
+  }));
+
+  const flagElements = allFlags.length > 0
+    ? [{
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: `**⚠️ Flags:**\n${allFlags.map(f => `• ${f}`).join('\n')}`,
+        },
+      }]
+    : [];
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: `✅ ${results.length} Photos Analysed` },
+      template: allFlags.length > 0 ? 'orange' : 'green',
+    },
+    elements: [
+      {
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: `**Vehicle:** ${vehicleLine}`,
+        },
+      },
+      { tag: 'hr' },
+      ...resultElements,
+      ...(flagElements.length > 0 ? [{ tag: 'hr' }, ...flagElements] : []),
+      { tag: 'hr' },
+      {
+        tag: 'note',
+        elements: [{
+          tag: 'plain_text',
+          content: 'Each result corresponds to photos in the order you sent them. Photos with ⚠️ have individual replies above.',
+        }],
+      },
+    ],
+  };
 }

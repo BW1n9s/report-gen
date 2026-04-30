@@ -147,3 +147,29 @@ export async function replyCardToMessage(messageId, card, env) {
     env,
   );
 }
+
+// ─── Update Existing Message ──────────────────────────────────────────────────
+
+/**
+ * Update the text content of an existing message in-place.
+ * Lark API: PUT /im/v1/messages/{message_id}/content
+ */
+export async function updateTextMessage(messageId, text, env) {
+  const token = await getToken(env);
+  const resp = await fetch(
+    `${env.LARK_API_URL}/im/v1/messages/${messageId}/content`,
+    {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        content: JSON.stringify({ text }),
+      }),
+    },
+  );
+  const data = await resp.json();
+  if (data.code !== 0) console.error('[lark] updateTextMessage failed:', JSON.stringify(data));
+  return data;
+}
