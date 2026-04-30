@@ -39,11 +39,11 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
     const token = await getToken(env);
     const imageData = await downloadImage(messageId, imageKey, token, env);
 
-    const analysis = await analyzeImageWithClaude(imageData, env);
+    const analysis = await analyzeImageWithClaude(imageData, env, 12000);
 
     let nameplateData = null;
     if (likelyNameplate(analysis)) {
-      nameplateData = await extractNameplateData(imageData, env);
+      nameplateData = await extractNameplateData(imageData, env, 12000);
     }
 
     // ── Nameplate / vehicle info merge ────────────────────────────────────────

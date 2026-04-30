@@ -40,6 +40,7 @@ export async function generateReport(session, env) {
     reportType,
     vehicleInfo,
     env,
+    25000,
   );
 
   const typeLabel = reportType === 'PD' ? 'Pre-Delivery Inspection Report' : 'Service Report';

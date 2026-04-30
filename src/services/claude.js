@@ -120,19 +120,11 @@ Use English. Concise engineering language.`;
 
 // ─── API Call Helper ──────────────────────────────────────────────────────────
 
-async function callClaude(env, systemPrompt, userContent, maxTokens = 1024) {
-  const payload = {
-    model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: maxTokens,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userContent }],
-  };
-
-  const CLAUDE_TIMEOUT_MS = 14000;
-
+// timeoutMs is per-attempt (not total); callers choose based on their budget
+async function callClaude(payload, env, timeoutMs = 25000) {
   const data = await withRetry(async () => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     let response;
     try {
@@ -148,7 +140,10 @@ async function callClaude(env, systemPrompt, userContent, maxTokens = 1024) {
       });
     } catch (err) {
       if (err.name === 'AbortError') {
-        throw Object.assign(new Error('Claude API timeout after 20s'), { status: 408 });
+        throw Object.assign(
+          new Error(`Claude API timeout after ${timeoutMs / 1000}s`),
+          { status: 408 },
+        );
       }
       throw err;
     } finally {
@@ -158,7 +153,10 @@ async function callClaude(env, systemPrompt, userContent, maxTokens = 1024) {
     if (response.status === 429) return response;
     if (!response.ok) {
       const errText = await response.text();
-      throw Object.assign(new Error(`Claude API error ${response.status}: ${errText}`), { status: response.status });
+      throw Object.assign(
+        new Error(`Claude API error ${response.status}: ${errText}`),
+        { status: response.status },
+      );
     }
     return response.json();
   });
@@ -166,24 +164,35 @@ async function callClaude(env, systemPrompt, userContent, maxTokens = 1024) {
   return data.content[0].text;
 }
 
+function basePayload(env, systemPrompt, userContent, maxTokens) {
+  return {
+    model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
+    max_tokens: maxTokens,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userContent }],
+  };
+}
+
 // ─── Exported Functions ───────────────────────────────────────────────────────
 
-export async function analyzeImageWithClaude(imageData, env) {
+export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000) {
   const { base64, mediaType } = imageData;
-  return callClaude(env, PROMPT_IMAGE, [
+  const payload = basePayload(env, PROMPT_IMAGE, [
     { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
     { type: 'text', text: 'Please analyse this inspection photo.' },
-  ]);
+  ], 1024);
+  return callClaude(payload, env, timeoutMs);
 }
 
 // Dedicated nameplate extraction → returns parsed JSON or null
-export async function extractNameplateData(imageData, env) {
+export async function extractNameplateData(imageData, env, timeoutMs = 25000) {
   const { base64, mediaType } = imageData;
   try {
-    const raw = await callClaude(env, PROMPT_DETECT_VEHICLE, [
+    const payload = basePayload(env, PROMPT_DETECT_VEHICLE, [
       { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
       { type: 'text', text: 'Extract nameplate data as JSON.' },
     ], 256);
+    const raw = await callClaude(payload, env, timeoutMs);
     const clean = raw.replace(/```json|```/g, '').trim();
     return JSON.parse(clean);
   } catch {
@@ -191,17 +200,23 @@ export async function extractNameplateData(imageData, env) {
   }
 }
 
-export async function analyzeTextWithClaude(text, env) {
-  return callClaude(env, PROMPT_TEXT, text);
+export async function analyzeTextWithClaude(text, env, timeoutMs = 25000) {
+  const payload = basePayload(env, PROMPT_TEXT, text, 1024);
+  return callClaude(payload, env, timeoutMs);
 }
 
-export async function generateReportWithClaude(summaries, datetime, reportType, vehicleInfo, env) {
+export async function generateReportWithClaude(summaries, datetime, reportType, vehicleInfo, env, timeoutMs = 25000) {
   const prompt = `Date/Time: ${datetime}
 Vehicle: ${vehicleInfo}
 
 Records:
 ${summaries}`;
 
-  const systemPrompt = reportType === 'PD' ? PROMPT_REPORT_PD : PROMPT_REPORT_SERVICE;
-  return callClaude(env, systemPrompt, prompt, 2048);
+  const payload = basePayload(
+    env,
+    reportType === 'PD' ? PROMPT_REPORT_PD : PROMPT_REPORT_SERVICE,
+    prompt,
+    2048,
+  );
+  return callClaude(payload, env, timeoutMs);
 }
