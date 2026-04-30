@@ -128,16 +128,33 @@ async function callClaude(env, systemPrompt, userContent, maxTokens = 1024) {
     messages: [{ role: 'user', content: userContent }],
   };
 
+  const CLAUDE_TIMEOUT_MS = 20000;
+
   const data = await withRetry(async () => {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(payload),
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
+
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw Object.assign(new Error('Claude API timeout after 20s'), { status: 408 });
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
     if (response.status === 429) return response;
     if (!response.ok) {
       const errText = await response.text();

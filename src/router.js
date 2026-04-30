@@ -27,11 +27,28 @@ export async function routeMessage(event, env) {
 
     if (messageType === 'image') {
       const messageId = message.message_id;
-      const imageKey = content.image_key;
-      const session = await getSession(userId, env);
-      await withUserQueue(env.REPORT_SESSIONS, userId, async () => {
-        await analyzeImage(imageKey, messageId, session, userId, env);
-      });
+      const imageKey = JSON.parse(message.content).image_key;
+
+      // Send immediate acknowledgement
+      // (already sent "🔍 Analysing image..." before this point — keep that)
+
+      try {
+        const session = await getSession(userId, env);
+        await withUserQueue(env.REPORT_SESSIONS, userId, async () => {
+          await analyzeImage(imageKey, messageId, session, userId, env);
+        });
+      } catch (err) {
+        console.error('[router] analyzeImage failed:', err);
+        // Always send a failure reply so user is not left hanging
+        try {
+          await replyToMessage(
+            messageId,
+            JSON.stringify({ text: `❌ Analysis failed: ${err.message || 'Unknown error'}. Please resend the photo.` }),
+            'text',
+            env,
+          );
+        } catch (_) {}
+      }
       return;
     }
 
