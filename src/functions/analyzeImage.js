@@ -30,9 +30,12 @@ function likelyNameplate(analysisText) {
 }
 
 export async function analyzeImage(imageKey, messageId, session, userId, env) {
-  await replyToMessage(messageId, JSON.stringify({ text: '🔍 Analysing image...' }), 'text', env);
-
   try {
+    // Pre-Claude session save — ensures KV has current state before the long API call.
+    // If the Worker is killed between Claude returning and the post-analysis save,
+    // at least the session (type, startTime, prior items) is not lost.
+    await updateSession(userId, session, env);
+
     const token = await getToken(env);
     const imageData = await downloadImage(messageId, imageKey, token, env);
 
@@ -103,57 +106,22 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       timestamp: new Date().toISOString(),
     });
 
+    // Post-Claude session save — full state including new analysis and vehicle info
     await updateSession(userId, session, env);
 
-    const count = session.items.length;
-    const vehicleLabel = session.vehicle?.model
-      ? `${session.vehicle.model}${session.vehicle.serial ? ' · ' + session.vehicle.serial : ''}`
-      : 'Vehicle not yet identified';
-
-    const card = {
-      config: { wide_screen_mode: true },
-      header: {
-        title: { tag: 'plain_text', content: `✅ Photo #${count} Analysed` },
-        template: 'green',
-      },
-      elements: [
-        {
-          tag: 'div',
-          text: { tag: 'lark_md', content: `${analysis}\n\n──────────\n🔧 ${vehicleLabel}` },
-        },
-        {
-          tag: 'action',
-          actions: [
-            { tag: 'button', text: { tag: 'plain_text', content: 'Check Status' }, type: 'default', value: { action: 'CHECKSTATUS' } },
-            { tag: 'button', text: { tag: 'plain_text', content: 'End' }, type: 'danger', value: { action: 'END' } },
-          ],
-        },
-      ],
-    };
-    await replyCardToMessage(messageId, card, env);
-
-    if (session.pendingConfirm) {
-      await replyToMessage(
-        messageId,
-        JSON.stringify({ text: `⚠️ Uncertain reading — ${session.pendingConfirm.prompt}` }),
-        'text',
-        env,
-      );
-    }
-
-    // ── Batch tracking ────────────────────────────────────────────────────────
+    // ── Batch tracking ───────────────────────────────────────────────────────
 
     const parsed = nameplateData; // null for non-nameplate images
 
     const batchResult = {
       originalMessageId: messageId,
-      imageType:  parsed?.imageType  || 'GENERAL',
-      confidence: parsed?.confidence || 'LOW',
-      summary:    buildResultSummary(parsed),
-      flags:      parsed?.flags      || [],
+      imageType:     parsed?.imageType    || 'GENERAL',
+      confidence:    parsed?.confidence   || 'LOW',
+      summary:       buildResultSummary(parsed),
+      flags:         parsed?.flags        || [],
       confirmNeeded: parsed?.confirmNeeded || false,
       confirmPrompt: parsed?.confirmPrompt || null,
-      vehicle:    parsed?.vehicle    || null,
+      vehicle:       parsed?.vehicle      || null,
     };
 
     const batchStatus = await addResult(env.REPORT_SESSIONS, userId, batchResult);
@@ -161,28 +129,31 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
     if (batchStatus) {
       const { completed, total, allDone, statusMsgId, data } = batchStatus;
 
-      // Update the single rolling status message (no new messages until done)
+      // Update the single status message with current count
       if (statusMsgId) {
         try {
-          const statusText = allDone
-            ? `✅ ${completed}/${total} photos analysed`
-            : `📸 ${completed}/${total} photos analysed, still processing...`;
-          await updateTextMessage(statusMsgId, statusText, env);
+          await updateTextMessage(
+            statusMsgId,
+            allDone
+              ? `✅ ${completed}/${total} photos analysed — summary below`
+              : `📸 ${completed}/${total} photos analysed, still processing...`,
+            env,
+          );
         } catch (_) {}
       }
 
+      // allDone is true for exactly ONE worker (the last to finish)
       if (allDone) {
-        // Send one summary card quoting the first image
+        // Send summary card, quoting the first image in the batch
         try {
           const summaryCard = buildBatchSummaryCard(data.results, session);
           const firstMsgId = data.images?.[0]?.messageId || messageId;
           await replyCardToMessage(firstMsgId, summaryCard, env);
         } catch (e) {
-          console.error('[analyzeImage] Failed to send summary card:', e);
+          console.error('[analyzeImage] summary card failed:', e);
         }
 
-        // After summary card: send individual replies ONLY for items needing confirmation
-        // This keeps the chat clean — only actionable items get their own message
+        // Send individual confirm prompts ONLY for items that need it
         for (const r of data.results) {
           if (r.confirmNeeded && r.confirmPrompt) {
             try {

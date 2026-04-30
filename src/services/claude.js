@@ -128,7 +128,7 @@ async function callClaude(env, systemPrompt, userContent, maxTokens = 1024) {
     messages: [{ role: 'user', content: userContent }],
   };
 
-  const CLAUDE_TIMEOUT_MS = 20000;
+  const CLAUDE_TIMEOUT_MS = 14000;
 
   const data = await withRetry(async () => {
     const controller = new AbortController();
