@@ -28,12 +28,27 @@ OIL & FLUID ASSESSMENT RULES (critical):
 SERVICE STICKER READING:
 When you see a DJJ Equipment service sticker, extract: Date, Hours, Service Type, Next Service Due date and hours.
 
-OUTPUT FORMAT (strict):
+SERIAL NUMBER — STRICT RULES:
+The vehicle Serial Number is ONLY taken from the "SERIAL NO." field on the metal nameplate.
+- Chassis/frame number (~20 chars starting with XCI): IGNORE
+- Mark uncertain digits with [?], e.g. "3[6?3]BE01543"
+
+OUTPUT FORMAT (strict) — you MUST always output both sections:
+
+ANALYSIS:
 Equipment: [brand + model if visible, or description]
 Check Item: [what is being inspected]
 Reading/Finding: [specific values or observations]
 Status: [Normal / Monitor / Action Required / Critical]
-Notes: [engineering language; flag uncertainties explicitly; do NOT make recommendations beyond what is directly visible — record objective findings only]`;
+Notes: [engineering language; flag uncertainties explicitly; do NOT make recommendations beyond what is directly visible — record objective findings only]
+
+NAMEPLATE_JSON:
+{"is_nameplate":false}
+
+If a nameplate IS visible, replace the NAMEPLATE_JSON line with the full JSON:
+{"is_nameplate":true,"model":"...","serial":"...","capacity_kg":null,"year":"...","voltage":null,"brand":"...","vehicle_type_hint":"...","confirmNeeded":false,"confirmPrompt":null,"flags":[]}
+
+vehicle_type_hint values: ICE_FORKLIFT | ELECTRIC_FORKLIFT | WALKIE | WHEEL_LOADER | SKID_STEER | UNKNOWN`;
 
 export const PROMPT_TEXT = `You are a DJJ Equipment service technician assistant. The technician has sent a voice-to-text or typed note about a service or inspection. Extract and structure the information.
 
@@ -48,45 +63,6 @@ Equipment: [model / serial / hours if mentioned, or "Not specified"]
 Action/Finding: [structured description in engineering language]
 Status: [Completed / Issue Found / Follow-up Required]
 Notes: [preserve important details; flag if clarification needed]`;
-
-export const PROMPT_DETECT_VEHICLE = `You are reading a Hangcha or DJJ Equipment nameplate/data plate image. Extract ALL visible information and return ONLY a JSON object with no other text:
-
-{
-  "model": "exact model string or null",
-  "serial": "serial/VIN number or null",
-  "capacity_kg": number or null,
-  "year": "YYYY or YYYY-MM or null",
-  "voltage": number or null,
-  "brand": "HANGCHA or LGMA or other or null",
-  "vehicle_type_hint": "ICE_FORKLIFT or ELECTRIC_FORKLIFT or WALKIE or WHEEL_LOADER or SKID_STEER or UNKNOWN",
-  "confirmNeeded": boolean,
-  "confirmPrompt": "question to ask user if confirmNeeded is true, else null",
-  "flags": []
-}
-
-vehicle_type_hint rules:
-- If model starts with CPDS, CPBS, CBD → ELECTRIC_FORKLIFT
-- If model starts with CPCD, CPQYD, CPYD → ICE_FORKLIFT
-- If model starts with LM, ZL → WHEEL_LOADER
-- If it says "ELECTRIC" or has a Voltage field → ELECTRIC_FORKLIFT
-- If it says "INTERNAL COMBUSTION" → ICE_FORKLIFT
-
-## SERIAL NUMBER — STRICT RULES
-The vehicle Serial Number is ONLY taken from the "SERIAL NO." field on the metal nameplate.
-
-Other numbers you may see and how to handle them:
-- Chassis/frame number (车架编号, format: XCISD…, ~20 chars): IGNORE — do not store as serial
-- Battery component number on conformity cert (合格证): use ONLY to cross-check nameplate serial
-
-Cross-check logic:
-- If nameplate serial and cert battery number differ by 1–2 characters, flag as likely OCR/glare misread
-- Always keep the nameplate value; note the discrepancy in flags[]
-- Example: nameplate=36BE01543, cert=33BE01543 → serial=36BE01543, flag="cert digit may be OCR misread (3→6)"
-
-Uncertain digits (glare/blur/reflection):
-- Mark uncertain characters with [?] — e.g. "3[6?3]BE01543"
-- Set confirmNeeded=true and write a confirmPrompt asking the user to verify
-- Do NOT silently guess`;
 
 export const PROMPT_REPORT_PD = `You are generating a DJJ Equipment Pre-Delivery Inspection (PD) report. Format it as a clean internal record.
 
@@ -188,24 +164,27 @@ export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000, 
   const payload = basePayload(env, PROMPT_IMAGE + contextNote, [
     { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
     { type: 'text', text: 'Please analyse this inspection photo.' },
-  ], 1024);
+  ], 1200);
   return callClaude(payload, env, timeoutMs);
 }
 
-// Dedicated nameplate extraction → returns parsed JSON or null
-export async function extractNameplateData(imageData, env, timeoutMs = 25000) {
-  const { base64, mediaType } = imageData;
-  try {
-    const payload = basePayload(env, PROMPT_DETECT_VEHICLE, [
-      { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
-      { type: 'text', text: 'Extract nameplate data as JSON.' },
-    ], 256);
-    const raw = await callClaude(payload, env, timeoutMs);
-    const clean = raw.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
-  } catch {
-    return null;
+export function parseAnalysisResponse(raw) {
+  const analysisMatch = raw.match(/ANALYSIS:\n([\s\S]*?)(?=\nNAMEPLATE_JSON:|$)/);
+  const jsonMatch = raw.match(/NAMEPLATE_JSON:\n(\{[\s\S]*\})/);
+
+  const analysis = analysisMatch ? analysisMatch[1].trim() : raw.trim();
+
+  let nameplateData = null;
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1].trim());
+      if (parsed.is_nameplate === true) {
+        nameplateData = parsed;
+      }
+    } catch (_) {}
   }
+
+  return { analysis, nameplateData };
 }
 
 export async function analyzeTextWithClaude(text, env, timeoutMs = 25000) {

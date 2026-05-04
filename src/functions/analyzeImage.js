@@ -1,5 +1,5 @@
 import { getToken, downloadImage, replyToMessage, replyCardToMessage, updateTextMessage } from '../services/lark.js';
-import { analyzeImageWithClaude, extractNameplateData } from '../services/claude.js';
+import { analyzeImageWithClaude, parseAnalysisResponse } from '../services/claude.js';
 import { updateSession } from '../services/session.js';
 import { detectVehicleType, CHECK_KEYWORDS } from '../data/checklists.js';
 import { addResult, clearBatch } from '../utils/batchTracker.js';
@@ -15,19 +15,6 @@ function inferCoveredChecks(analysisText) {
   return covered;
 }
 
-function likelyNameplate(analysisText) {
-  const lower = analysisText.toLowerCase();
-  return (
-    lower.includes('nameplate') ||
-    lower.includes('data plate') ||
-    lower.includes('serial') ||
-    lower.includes('rated capacity') ||
-    lower.includes('model') ||
-    lower.includes('year of manufacture') ||
-    lower.includes('铭牌') ||
-    lower.includes('合格证')
-  );
-}
 
 export async function analyzeImage(imageKey, messageId, session, userId, env) {
   try {
@@ -53,12 +40,8 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       if (parts.length > 0) vehicleContext = parts.join('\n');
     }
 
-    const analysis = await analyzeImageWithClaude(imageData, env, 25000, vehicleContext);
-
-    let nameplateData = null;
-    if (likelyNameplate(analysis)) {
-      nameplateData = await extractNameplateData(imageData, env, 25000);
-    }
+    const raw = await analyzeImageWithClaude(imageData, env, 25000, vehicleContext);
+    const { analysis, nameplateData } = parseAnalysisResponse(raw);
 
     // ── Nameplate / vehicle info merge ────────────────────────────────────────
     if (nameplateData && nameplateData.model) {
