@@ -39,7 +39,21 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
     const token = await getToken(env);
     const imageData = await downloadImage(messageId, imageKey, token, env);
 
-    const analysis = await analyzeImageWithClaude(imageData, env, 12000);
+    // Build vehicle context from session
+    let vehicleContext = null;
+    if (session.vehicle) {
+      const parts = [];
+      if (session.vehicle.model) parts.push(`Model: ${session.vehicle.model}`);
+      if (session.vehicle.type) {
+        const isElectric = session.vehicle.type === 'FORKLIFT_ELECTRIC' || session.vehicle.type === 'FORKLIFT_WALKIE';
+        parts.push(`Vehicle type: ${session.vehicle.type}`);
+        if (isElectric) parts.push('This is an ELECTRIC vehicle — it has NO engine, NO engine oil, NO fuel system, NO transmission oil.');
+      }
+      if (session.vehicle.serial) parts.push(`Serial: ${session.vehicle.serial}`);
+      if (parts.length > 0) vehicleContext = parts.join('\n');
+    }
+
+    const analysis = await analyzeImageWithClaude(imageData, env, 12000, vehicleContext);
 
     let nameplateData = null;
     if (likelyNameplate(analysis)) {
@@ -135,8 +149,8 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
           await updateTextMessage(
             statusMsgId,
             allDone
-              ? `✅ ${completed}/${total} photos analysed — summary below`
-              : `📸 ${completed}/${total} photos analysed, still processing...`,
+              ? `✅ ${completed}/${total} 已处理完成，以下是分析结果`
+              : `📸 已收到 ${total} 张，正在处理 (${completed}/${total} 完成)...`,
             env,
           );
         } catch (_) {}

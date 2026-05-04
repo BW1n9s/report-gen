@@ -33,7 +33,7 @@ Equipment: [brand + model if visible, or description]
 Check Item: [what is being inspected]
 Reading/Finding: [specific values or observations]
 Status: [Normal / Monitor / Action Required / Critical]
-Notes: [engineering language; flag uncertainties explicitly]`;
+Notes: [engineering language; flag uncertainties explicitly; do NOT make recommendations beyond what is directly visible — record objective findings only]`;
 
 export const PROMPT_TEXT = `You are a DJJ Equipment service technician assistant. The technician has sent a voice-to-text or typed note about a service or inspection. Extract and structure the information.
 
@@ -96,7 +96,8 @@ Structure:
 3. Issues & Abnormalities section (if any)
 4. Sign-off line
 
-Use English. Be concise. No customer-facing language needed — this is an internal record.`;
+Use English. Be concise. No customer-facing language needed — this is an internal record.
+IMPORTANT: Report findings objectively. Do not make recommendations beyond what the photos and notes directly show. Do not replace the operator's judgment — flag observations only.`;
 
 export const PROMPT_REPORT_SERVICE = `You are generating a DJJ Equipment Service Report. Format it to match this structure:
 
@@ -116,7 +117,8 @@ Next Service Due:
 Notes:
 [any follow-up items, customer observations, recommendations]
 
-Use English. Concise engineering language.`;
+Use English. Concise engineering language.
+IMPORTANT: Only include what was directly observed or recorded. Do not infer or add recommendations unless explicitly noted by the operator.`;
 
 // ─── API Call Helper ──────────────────────────────────────────────────────────
 
@@ -175,9 +177,15 @@ function basePayload(env, systemPrompt, userContent, maxTokens) {
 
 // ─── Exported Functions ───────────────────────────────────────────────────────
 
-export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000) {
+export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000, vehicleContext = null) {
   const { base64, mediaType } = imageData;
-  const payload = basePayload(env, PROMPT_IMAGE, [
+
+  let contextNote = '';
+  if (vehicleContext) {
+    contextNote = `\n\nVEHICLE CONTEXT FOR THIS SESSION:\n${vehicleContext}\nUse this context when interpreting ambiguous readings (e.g. electric forklifts do not have engine oil).`;
+  }
+
+  const payload = basePayload(env, PROMPT_IMAGE + contextNote, [
     { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
     { type: 'text', text: 'Please analyse this inspection photo.' },
   ], 1024);

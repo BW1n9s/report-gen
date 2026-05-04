@@ -23,6 +23,7 @@ export async function handleCommand({ text, userId, chatId, env }) {
     '检查占用': 'CHECKSTATUS', '/状态': 'CHECKSTATUS',
     '结束': 'END', '/报告': 'END',
     '/清除': 'CLEAR',
+    '中断': 'ABORT', '/中断': 'ABORT',
     'PD': 'PD',
     'SERVICE': 'SERVICE',
   }[cmd] ?? cmd.toUpperCase();
@@ -42,6 +43,13 @@ export async function handleCommand({ text, userId, chatId, env }) {
       break;
     case 'END':
       await cmdEnd({ userId, chatId, env });
+      break;
+    case 'ABORT':
+      await cmdAbort({ userId, chatId, env });
+      break;
+    case 'CONFIRM_ABORT':
+      await clearSession(userId, env);
+      await sendMessage(chatId, '🗑️ Session aborted. All records discarded.', env);
       break;
     case 'CLEAR':
       await clearSession(userId, env);
@@ -132,6 +140,25 @@ async function cmdStatus({ userId, chatId, env }) {
     buttons: [
       { label: 'Check Status', action: 'CHECKSTATUS', type: 'default' },
       { label: 'End', action: 'END', type: 'danger' },
+    ],
+  }, env);
+}
+
+// 中断当前 session，发送确认卡片防止误操作
+async function cmdAbort({ userId, chatId, env }) {
+  const session = await getSession(userId, env);
+
+  if (session.items.length === 0 && !session.report_type) {
+    await sendMessage(chatId, '📭 No active record to abort.', env);
+    return;
+  }
+
+  await sendCard(chatId, {
+    header: { title: '⚠️ Confirm Abort', style: 'red' },
+    body: `You have ${session.items.length} record(s) in progress. Abort will discard all records without generating a report.\n\nTap **Confirm Abort** to discard, or ignore this message to continue.`,
+    buttons: [
+      { label: 'Confirm Abort', action: 'CONFIRM_ABORT', type: 'danger' },
+      { label: 'Continue', action: 'CHECKSTATUS', type: 'primary' },
     ],
   }, env);
 }

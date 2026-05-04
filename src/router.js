@@ -7,8 +7,8 @@ import { sendMessage, replyToMessage } from './services/lark.js';
 import { getSession, updateSession } from './services/session.js';
 
 const COMMAND_KEYWORDS = new Set([
-  'START', 'CHECKSTATUS', 'END',
-  '开始', '检查占用', '结束',
+  'START', 'CHECKSTATUS', 'END', 'ABORT',
+  '开始', '检查占用', '结束', '中断',
   'PD', 'SERVICE',
 ]);
 
@@ -36,7 +36,7 @@ export async function routeMessage(event, env) {
 
         if (isNew) {
           // First image in this batch — send ONE status message
-          const statusResp = await sendMessage(chatId, '📸 Photos received — analysing...', env);
+          const statusResp = await sendMessage(chatId, '📸 已收到照片，正在分析...', env);
           const newStatusMsgId = statusResp?.data?.message_id;
           if (newStatusMsgId) {
             await setStatusMsgId(env.REPORT_SESSIONS, userId, newStatusMsgId);
