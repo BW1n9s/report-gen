@@ -1,6 +1,6 @@
 import { VEHICLE_TYPES } from '../data/checklists.js';
 import { getTemplate } from '../templates/index.js';
-import { copyDocumentToRoot, appendReportBlocks, getDocumentUrl } from '../services/lark.js';
+import { getWikiNodeObjToken, copyDocumentToRoot, appendReportBlocks, getDocumentUrl } from '../services/lark.js';
 
 export async function generateReport(session, env) {
   const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
@@ -93,12 +93,13 @@ export async function generateReportAsLarkDoc(session, env) {
 
   if (reportType !== 'PDI') return null;
 
-  // 直接用硬编码的 doc token，不走 wiki API
-  const docToken = vehicleType === 'WHEEL_LOADER'
-    ? env.LOADER_PDI_DOC_TOKEN
-    : env.FORKLIFT_PDI_DOC_TOKEN;
+  const wikiToken = vehicleType === 'WHEEL_LOADER'
+    ? env.LOADER_PDI_WIKI_TOKEN
+    : env.FORKLIFT_PDI_WIKI_TOKEN;
 
-  if (!docToken || docToken.startsWith('<')) return null;
+  if (!wikiToken) return null;
+
+  const docToken = await getWikiNodeObjToken(wikiToken, env);
 
   const now   = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
   const title = [

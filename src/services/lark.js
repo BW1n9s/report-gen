@@ -151,10 +151,18 @@ export async function replyCardToMessage(messageId, card, env) {
 // ─── Update Existing Message ──────────────────────────────────────────────────
 
 /**
- * Update the text content of an existing message in-place.
- * Lark API: PUT /im/v1/messages/{message_id}/content
+ * Resolve a Wiki node token to the underlying docx obj_token.
+ * Requires wiki:wiki:readonly permission.
  */
-// ─── Lark Docs (docx) ─────────────────────────────────────────────────────────
+export async function getWikiNodeObjToken(wikiToken, env) {
+  const token = await getToken(env);
+  const res = await fetch(`${env.LARK_API_URL}/wiki/v2/spaces/get_node?token=${wikiToken}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`getWikiNodeObjToken failed (${data.code}): ${data.msg}`);
+  return data.data.node.obj_token;
+}
 
 /**
  * Copy a docx template into the bot's root folder with a new title.
