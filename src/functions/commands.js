@@ -1,16 +1,22 @@
 import { sendMessage, sendCard } from '../services/lark.js';
 import { getSession, clearSession } from '../services/session.js';
-import { generateReport } from './generateReport.js';
+import { generateReport, generateReportAsLarkDoc } from './generateReport.js';
+
+function normalizeReportType(raw) {
+  if (!raw) return 'PDI';
+  if (raw === 'PD') return 'PDI';
+  return raw;
+}
 
 // 报告类型配置 — 未来可在此添加更多类型或用户自定义模板
 const REPORT_TYPES = {
-  PD: {
-    label: '发车前检查 (PD)',
-    description: '检查车辆出发前的各项状态',
+  PDI: {
+    label: 'Delivery Inspection (PDI)',
+    description: '新机交付检查 — 发送照片和文字记录检查结果，完成后生成报告',
   },
   SERVICE: {
-    label: '外出保养 (Service)',
-    description: '记录外出保养的操作和结果',
+    label: 'Service Record / 外出服务记录',
+    description: '记录外出服务的操作和结果',
   },
 };
 
@@ -24,7 +30,8 @@ export async function handleCommand({ text, userId, chatId, env }) {
     '结束': 'END', '/报告': 'END',
     '/清除': 'CLEAR',
     '中断': 'ABORT', '/中断': 'ABORT',
-    'PD': 'PD',
+    'PDI':     'PDI',
+    'PD':      'PDI',
     'SERVICE': 'SERVICE',
   }[cmd] ?? cmd.toUpperCase();
 
@@ -32,8 +39,8 @@ export async function handleCommand({ text, userId, chatId, env }) {
     case 'START':
       await cmdStart({ userId, chatId, env });
       break;
-    case 'PD':
-      await cmdSetType({ userId, chatId, type: 'PD', env });
+    case 'PDI':
+      await cmdSetType({ userId, chatId, type: 'PDI', env });
       break;
     case 'SERVICE':
       await cmdSetType({ userId, chatId, type: 'SERVICE', env });
@@ -66,7 +73,7 @@ async function cmdStart({ userId, chatId, env }) {
   if (session.items.length > 0) {
     await sendMessage(
       chatId,
-      `⚠️ 你有一个进行中的 ${REPORT_TYPES[session.report_type]?.label ?? session.report_type} 记录（共 ${session.items.length} 条）。\n发送 END 完成报告，或 /清除 放弃当前记录。`,
+      `⚠️ 你有一个进行中的 ${REPORT_TYPES[normalizeReportType(session.report_type)]?.label ?? session.report_type} 记录（共 ${session.items.length} 条）。\n发送 END 完成报告，或 /清除 放弃当前记录。`,
       env,
     );
     return;
@@ -76,8 +83,8 @@ async function cmdStart({ userId, chatId, env }) {
     header: { title: '📋 新建巡检记录', style: 'blue' },
     body: '请选择本次检查类型：',
     buttons: [
-      { label: '发车前检查 (PD)', action: 'PD', type: 'primary' },
-      { label: '外出保养 (Service)', action: 'SERVICE', type: 'default' },
+      { label: 'Delivery Inspection (PDI)', action: 'PDI', type: 'primary' },
+      { label: 'Service Record', action: 'SERVICE', type: 'default' },
     ],
   }, env);
 }
@@ -109,8 +116,8 @@ async function cmdStatus({ userId, chatId, env }) {
       header: { title: '📭 No active record', style: 'grey' },
       body: 'Start a new inspection below.',
       buttons: [
-        { label: 'Pre-Delivery (PD)', action: 'PD', type: 'primary' },
-        { label: 'Service', action: 'SERVICE', type: 'default' },
+        { label: 'Delivery Inspection (PDI)', action: 'PDI', type: 'primary' },
+        { label: 'Service Record', action: 'SERVICE', type: 'default' },
       ],
     }, env);
     return;
@@ -120,14 +127,14 @@ async function cmdStatus({ userId, chatId, env }) {
   const texts = session.items.filter((i) => i.type === 'text').length;
   const since = new Date(session.created_at).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
 
-  const typeLabel = session.report_type === 'PD' ? 'Pre-Delivery (PD)' : 'Service';
+  const typeLabel = REPORT_TYPES[normalizeReportType(session.report_type)]?.label ?? session.report_type;
   const vehicleLabel = session.vehicle?.model
     ? `${session.vehicle.model}${session.vehicle.serial ? ' · ' + session.vehicle.serial : ''}`
     : '⚠️ Vehicle not yet identified — send a nameplate photo';
 
   // PD 时显示检查项覆盖进度
   let progressText = '';
-  if (session.report_type === 'PD' && session.vehicle?.type && session.vehicle.type !== 'UNKNOWN') {
+  if (normalizeReportType(session.report_type) === 'PDI' && session.vehicle?.type && session.vehicle.type !== 'UNKNOWN') {
     const { getChecklistForType } = await import('../data/checklists.js');
     const checklist = getChecklistForType(session.vehicle.type);
     const coveredCount = checklist.filter((i) => session.covered_checks.includes(i.id)).length;
@@ -172,12 +179,28 @@ async function cmdEnd({ userId, chatId, env }) {
     return;
   }
 
-  const typeLabel = REPORT_TYPES[session.report_type]?.label ?? session.report_type ?? '巡检';
+  const reportType = normalizeReportType(session.report_type);
+  const typeLabel  = REPORT_TYPES[reportType]?.label ?? reportType;
+
   await sendMessage(chatId, `📝 正在生成 ${typeLabel} 报告（共 ${session.items.length} 条记录）…`, env);
 
   try {
     const report = await generateReport(session, env);
     await sendMessage(chatId, report, env);
+
+    try {
+      const docResult = await generateReportAsLarkDoc(session, env);
+      if (docResult) {
+        await sendCard(chatId, {
+          header: { title: '📄 Lark 文档已生成', style: 'green' },
+          body: `**${docResult.title}**\n\n点击下方链接查看和编辑完整交付检查报告。`,
+          buttons: [{ label: '打开文档', action: docResult.url, type: 'primary' }],
+        }, env);
+      }
+    } catch (docErr) {
+      console.error('[cmdEnd] Lark doc generation failed:', docErr);
+    }
+
     await clearSession(userId, env);
   } catch (e) {
     console.error('Generate report error:', e);

@@ -2,45 +2,61 @@ import { withRetry } from '../utils/retry.js';
 
 // ─── System Prompts ───────────────────────────────────────────────────────────
 
-export const PROMPT_IMAGE = `You are a forklift/loader inspection assistant. Analyse the photo and return ONLY a JSON object, no other text.
+export const PROMPT_IMAGE = `You are a forklift/loader inspection assistant. Analyse the photo and return ONLY a valid JSON object, no other text.
 
 Output schema:
 {
-  "check_id": "one of: engine_oil|coolant|hydraulic_oil|transmission_oil|brake_fluid|diff_oil|battery_charge|battery_connection|air_filter|fan_belt|tyres|mast_chain|fork_tyne|grease_points|nameplate|service_sticker|general",
+  "check_id": "<section id from list below>",
   "status": "ok|low|leak|dirty|missing|unreadable|n/a",
-  "reading": "brief factual value or observation, max 15 words",
+  "reading": "<objective fact only, max 12 words>",
   "nameplate": null
 }
 
-If the photo shows a nameplate/data plate, set check_id="nameplate" and populate nameplate field:
+Section IDs — pick the single best match:
+  nameplate              — data plate, serial number plate, rating plate
+  attachment_accessories — keys, manuals, charger, forks, attachments present/missing
+  visual_structure       — body panels, paint, frame, overhead guard, decals, wiring routing
+  fluid_levels           — any fluid level, coolant, fuel, hydraulic oil, fluid leaks
+  engine_mechanical      — engine start/idle, belts, air filter, exhaust, engine mounts
+  electrical_system      — battery terminals, lights, horn, dashboard display, Curtis faults
+  hydraulic_system       — pump noise, hoses, cylinders, lift/tilt/sideshift/valve function
+  mast_fork_chain        — mast rails, rollers, lift chains, fork arms, carriage (forklifts)
+  loader_arm_axle        — loader arm, axle condition, bucket pins, locking pins (loaders)
+  steering_brake_dynamic — drive/travel test, service brake, park brake, steering, noise
+  tyre_wheel             — tyre condition, pressure, wear, cuts, wheel nuts, rim, torque
+  safety_functions       — seat switch, interlock, reverse alarm, beacon, mirrors, e-stop
+  maintenance_work       — completed work: oil change, filter, grease, lube, tyre check
+  final_result           — overall pass/fail, ready-for-delivery decision, test complete
+  general                — cannot match any section above
+
+If photo shows a nameplate or data plate, set check_id="nameplate" and populate nameplate:
 {
   "check_id": "nameplate",
   "status": "ok",
   "reading": "nameplate visible",
   "nameplate": {
     "model": "string or null",
-    "serial": "string or null — ONLY from SERIAL NO. field on metal plate",
+    "serial": "string or null — ONLY from SERIAL NO. field on plate",
     "capacity_kg": number or null,
     "year": "YYYY or null",
     "voltage": number or null,
-    "vehicle_type": "ICE_FORKLIFT|ELECTRIC_FORKLIFT|WALKIE|WHEEL_LOADER|SKID_STEER|UNKNOWN",
+    "vehicle_type": "FORKLIFT_ICE|FORKLIFT_ELECTRIC|FORKLIFT_WALKIE|WHEEL_LOADER|UNKNOWN",
     "confirm_needed": false,
     "confirm_prompt": null
   }
 }
 
 Rules:
-- status "n/a" = item not relevant to this vehicle type (e.g. engine_oil on electric forklift)
-- reading must be objective fact only, no recommendations
-- uncertain digits: use [?] notation e.g. "3[6?]BE01543", set confirm_needed=true
+- reading = objective fact only, no recommendations, no filler phrases
+- status "n/a" = item not applicable for this vehicle type
+- uncertain digits: "3[6?]BE01543", set confirm_needed=true, confirm_prompt="Please confirm digit 2 of serial"
 - If vehicle context says ELECTRIC: engine_oil/transmission_oil/fuel → status "n/a"`;
 
 export const PROMPT_TEXT = `Extract inspection note into JSON only, no other text.
 {
-  "check_id": "one of: engine_oil|coolant|hydraulic_oil|transmission_oil|brake_fluid|diff_oil|battery_charge|battery_connection|air_filter|tyres|mast_chain|fork_tyne|general",
-  "status": "ok|low|leak|dirty|missing|noted",
-  "reading": "brief factual summary, max 15 words",
-  "raw": "copy of original text"
+  "check_id": "nameplate|attachment_accessories|visual_structure|fluid_levels|engine_mechanical|electrical_system|hydraulic_system|mast_fork_chain|loader_arm_axle|steering_brake_dynamic|tyre_wheel|safety_functions|maintenance_work|final_result|general",
+  "status": "ok|low|leak|dirty|missing|noted|n/a",
+  "reading": "objective fact only, max 12 words"
 }`;
 
 // ─── API Call Helper ──────────────────────────────────────────────────────────

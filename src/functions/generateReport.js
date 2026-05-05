@@ -1,91 +1,112 @@
-import { VEHICLE_TYPES } from '../data/checklists.js';
 import { getTemplate } from '../templates/index.js';
-import { getWikiNodeObjToken, copyDocumentToRoot, appendReportBlocks, getDocumentUrl } from '../services/lark.js';
+import {
+  getWikiNodeObjToken,
+  copyDocumentToRoot,
+  appendReportBlocks,
+  getDocumentUrl,
+} from '../services/lark.js';
 
+const STATUS_ICON = {
+  ok:          '✓',
+  low:         '⚠ Low',
+  leak:        '⚠ Leak',
+  dirty:       '⚠ Dirty',
+  missing:     '✗ Missing',
+  unreadable:  '—',
+  'n/a':       'N/A',
+  noted:       '✓',
+};
+
+// 兼容旧 session（report_type 可能是 'PD'）
+function normalizeReportType(raw) {
+  if (!raw) return 'PDI';
+  if (raw === 'PD') return 'PDI';
+  return raw;
+}
+
+// session.items → { check_id: [items] }
+function buildItemMap(items) {
+  const map = {};
+  for (const item of items) {
+    const id = item.check_id || 'general';
+    if (!map[id]) map[id] = [];
+    map[id].push(item);
+  }
+  return map;
+}
+
+// 生成纯文本报告
 export async function generateReport(session, env) {
-  const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
-  const reportType = session.report_type ?? 'SERVICE';
-  const v = session.vehicle ?? {};
+  const now         = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
+  const reportType  = normalizeReportType(session.report_type);
+  const v           = session.vehicle ?? {};
+  const vehicleType = v.type ?? 'UNKNOWN';
 
   const vehicleLine = [
     v.model,
     v.serial ? `S/N: ${v.serial}` : null,
-    v.hours ? `${v.hours}h` : null,
-    v.type ? VEHICLE_TYPES[v.type] : null,
+    v.hours  ? `${v.hours}h`       : null,
   ].filter(Boolean).join(' | ') || 'Vehicle not identified';
 
-  const template = await getTemplate(reportType, v.type ?? 'UNKNOWN');
+  const template = getTemplate(reportType, vehicleType);
+  const itemMap  = buildItemMap(session.items);
+  const issues   = [];
 
-  const STATUS_ICON = {
-    ok: '✓', low: '⚠ Low', leak: '⚠ Leak', dirty: '⚠ Dirty',
-    missing: '✗ Missing', unreadable: '—', 'n/a': 'N/A', noted: '✓',
-  };
-
-  // 按 check_id 汇总记录
-  const itemMap = {};
-  for (const item of session.items) {
-    const id = item.check_id || 'general';
-    if (!itemMap[id]) itemMap[id] = [];
-    itemMap[id].push(item);
-  }
+  // 不进入报告正文的 check_id（仅用于车辆识别）
+  const SKIP_IDS = new Set(['nameplate', 'general']);
 
   let body = '';
 
   for (const section of template.sections) {
-    const isNA = section.na_for && section.na_for.includes(v.type);
-    const records = itemMap[section.id];
+    if (section.id === 'basic_info') continue;
 
-    if (isNA) {
+    // Section 整体对该车型 N/A
+    if (Array.isArray(section.na_for) && section.na_for.includes(vehicleType)) {
       body += `N/A          ${section.label}\n`;
-    } else if (records && records.length > 0) {
-      const latest = records[records.length - 1];
+      continue;
+    }
+
+    const records = itemMap[section.id] ?? [];
+    const latest  = records[records.length - 1];
+
+    if (latest) {
       const icon = STATUS_ICON[latest.status] ?? latest.status ?? '•';
       body += `${icon.padEnd(12)} ${section.label}\n`;
       if (latest.reading) body += `             → ${latest.reading}\n`;
-      // 额外记录（同一项多次）
-      if (records.length > 1) {
-        for (const extra of records.slice(0, -1)) {
-          if (extra.reading) body += `             → ${extra.reading}\n`;
-        }
+      // 同一 section 多条记录（多张照片）
+      for (const extra of records.slice(0, -1)) {
+        if (extra.reading) body += `             → ${extra.reading}\n`;
+      }
+      if (['low', 'leak', 'dirty', 'missing'].includes(latest.status)) {
+        issues.push(`[${section.id}] ${latest.reading}`);
       }
     } else {
       body += `${'—'.padEnd(12)} ${section.label}\n`;
     }
   }
 
-  // 模板之外的额外记录（operator 做了模板没有的工作）
+  // 模板外额外记录（排除 nameplate 和 general）
   const templateIds = new Set(template.sections.map(s => s.id));
-  const extras = session.items.filter(i => !templateIds.has(i.check_id ?? 'general') || i.check_id === 'general');
+  const extras = session.items.filter(
+    i => !SKIP_IDS.has(i.check_id ?? 'general') && !templateIds.has(i.check_id ?? 'general'),
+  );
   if (extras.length > 0) {
     body += '\nADDITIONAL WORK / NOTES:\n';
     for (const i of extras) {
-      const icon = STATUS_ICON[i.status] ?? '•';
-      body += `${icon} [${i.check_id ?? 'note'}] ${i.reading ?? i.raw ?? ''}\n`;
+      body += `• [${i.check_id}] ${i.reading ?? i.raw ?? ''}\n`;
     }
   }
 
   // 异常汇总
-  const issues = session.items.filter(i => ['low', 'leak', 'dirty', 'missing'].includes(i.status));
   if (issues.length > 0) {
     body += '\nISSUES NOTED:\n';
-    for (const i of issues) {
-      body += `⚠ [${i.check_id}] ${i.reading}\n`;
-    }
+    for (const issue of issues) body += `⚠ ${issue}\n`;
   }
 
-  return `📋 ${template.title}\n🕐 ${now}\n🔧 ${vehicleLine}\n${'─'.repeat(40)}\n${body}`;
+  return `📋 ${template.title}\n🕐 ${now}\n🔧 ${vehicleLine}\n${'─'.repeat(44)}\n\n${body}`;
 }
 
-// 'PD' is the legacy session value; templates use 'PDI'
-function normalizeReportType(raw) {
-  if (raw === 'PD') return 'PDI';
-  return raw ?? 'SERVICE';
-}
-
-/**
- * Copy the appropriate PDI template doc, fill it with report text, and return
- * the URL. Returns null for SERVICE reports or if no doc token is configured.
- */
+// Lark 文档生成（PDI 专用，复制 Wiki 模板 → 写入报告内容）
 export async function generateReportAsLarkDoc(session, env) {
   const reportType  = normalizeReportType(session.report_type);
   const v           = session.vehicle ?? {};
@@ -99,8 +120,6 @@ export async function generateReportAsLarkDoc(session, env) {
 
   if (!wikiToken) return null;
 
-  const docToken = await getWikiNodeObjToken(wikiToken, env);
-
   const now   = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
   const title = [
     v.model ?? 'Unknown',
@@ -108,7 +127,9 @@ export async function generateReportAsLarkDoc(session, env) {
     `PDI ${now.split(',')[0]}`,
   ].filter(Boolean).join(' — ');
 
-  const newFile    = await copyDocumentToRoot(docToken, title, env);
+  // wiki token → docx obj_token → 复制文档 → 写入报告
+  const objToken   = await getWikiNodeObjToken(wikiToken, env);
+  const newFile    = await copyDocumentToRoot(objToken, title, env);
   const reportText = await generateReport(session, env);
   await appendReportBlocks(newFile.token, reportText, env);
 
