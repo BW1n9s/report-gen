@@ -1,16 +1,19 @@
-export async function getTemplate(reportType, vehicleType) {
-  // vehicleType: FORKLIFT_ICE | FORKLIFT_ELECTRIC | FORKLIFT_WALKIE | WHEEL_LOADER | SKID_STEER | UNKNOWN
-  // reportType: PD | SERVICE
+import { template as forkliftPdiTemplate } from './pd_forklift.js';
+import { template as loaderPdiTemplate } from './pd_loader.js';
+import { template as forkliftServiceTemplate } from './service_forklift.js';
+import { template as loaderServiceTemplate } from './service_loader.js';
 
-  const isLoader = vehicleType === 'WHEEL_LOADER' || vehicleType === 'SKID_STEER';
+// vehicleType: FORKLIFT_ICE | FORKLIFT_ELECTRIC | FORKLIFT_WALKIE | WHEEL_LOADER | UNKNOWN
+// reportType:  PDI | SERVICE
 
-  if (reportType === 'PD') {
-    return isLoader
-      ? (await import('./pd_loader.js')).template
-      : (await import('./pd_forklift.js')).template;
-  } else {
-    return isLoader
-      ? (await import('./service_loader.js')).template
-      : (await import('./service_forklift.js')).template;
+export function getTemplate(reportType, vehicleType) {
+  if (reportType === 'PDI') {
+    if (vehicleType === 'WHEEL_LOADER') return loaderPdiTemplate;
+    return forkliftPdiTemplate; // ICE / ELECTRIC / WALKIE / UNKNOWN
   }
+  if (reportType === 'SERVICE') {
+    if (vehicleType === 'WHEEL_LOADER') return loaderServiceTemplate;
+    return forkliftServiceTemplate;
+  }
+  throw new Error('Unknown reportType: ' + reportType);
 }
