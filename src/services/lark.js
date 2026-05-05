@@ -154,6 +154,57 @@ export async function replyCardToMessage(messageId, card, env) {
  * Update the text content of an existing message in-place.
  * Lark API: PUT /im/v1/messages/{message_id}/content
  */
+// ─── Lark Docs (docx) ─────────────────────────────────────────────────────────
+
+/**
+ * Copy a docx template into the bot's root folder with a new title.
+ * Requires drive:file permission and the template shared to the bot.
+ * Returns { token, url, name } from the Lark Drive API response.
+ */
+export async function copyDocumentToRoot(docToken, title, env) {
+  const token = await getToken(env);
+  const res = await fetch(`${env.LARK_API_URL}/drive/v1/files/${docToken}/copy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ name: title, type: 'docx', folder_token: '' }),
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`copyDocumentToRoot failed (${data.code}): ${data.msg}`);
+  return data.data.file; // { token, url, name, ... }
+}
+
+/**
+ * Append plain-text report lines as paragraph blocks to a docx document.
+ * Uses the Lark docx v1 batch_create blocks API.
+ */
+export async function appendReportBlocks(documentId, reportText, env) {
+  const token = await getToken(env);
+  const lines = reportText.split('\n').filter(l => l.trim());
+  const children = lines.map(line => ({
+    block_type: 2, // paragraph
+    paragraph: {
+      elements: [{ type: 'text_run', text_run: { content: line } }],
+    },
+  }));
+
+  const res = await fetch(
+    `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children/batch_create`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ children, index: -1 }),
+    },
+  );
+  const data = await res.json();
+  if (data.code !== 0) console.error('[lark] appendReportBlocks failed:', JSON.stringify(data));
+  return data;
+}
+
+/** Return the public URL for a Lark docx file token. */
+export function getDocumentUrl(fileToken) {
+  return `https://www.larksuite.com/docx/${fileToken}`;
+}
+
 export async function updateTextMessage(messageId, text, env) {
   const token = await getToken(env);
   const resp = await fetch(

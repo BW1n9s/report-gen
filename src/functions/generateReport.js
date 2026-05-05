@@ -1,5 +1,6 @@
 import { VEHICLE_TYPES } from '../data/checklists.js';
 import { getTemplate } from '../templates/index.js';
+import { copyDocumentToRoot, appendReportBlocks, getDocumentUrl } from '../services/lark.js';
 
 export async function generateReport(session, env) {
   const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
@@ -73,4 +74,42 @@ export async function generateReport(session, env) {
   }
 
   return `📋 ${template.title}\n🕐 ${now}\n🔧 ${vehicleLine}\n${'─'.repeat(40)}\n${body}`;
+}
+
+// 'PD' is the legacy session value; templates use 'PDI'
+function normalizeReportType(raw) {
+  if (raw === 'PD') return 'PDI';
+  return raw ?? 'SERVICE';
+}
+
+/**
+ * Copy the appropriate PDI template doc, fill it with report text, and return
+ * the URL. Returns null for SERVICE reports or if no doc token is configured.
+ */
+export async function generateReportAsLarkDoc(session, env) {
+  const reportType  = normalizeReportType(session.report_type);
+  const v           = session.vehicle ?? {};
+  const vehicleType = v.type ?? 'UNKNOWN';
+
+  if (reportType !== 'PDI') return null;
+
+  // 直接用硬编码的 doc token，不走 wiki API
+  const docToken = vehicleType === 'WHEEL_LOADER'
+    ? env.LOADER_PDI_DOC_TOKEN
+    : env.FORKLIFT_PDI_DOC_TOKEN;
+
+  if (!docToken || docToken.startsWith('<')) return null;
+
+  const now   = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
+  const title = [
+    v.model ?? 'Unknown',
+    v.serial ?? '',
+    `PDI ${now.split(',')[0]}`,
+  ].filter(Boolean).join(' — ');
+
+  const newFile    = await copyDocumentToRoot(docToken, title, env);
+  const reportText = await generateReport(session, env);
+  await appendReportBlocks(newFile.token, reportText, env);
+
+  return { url: getDocumentUrl(newFile.token), title };
 }

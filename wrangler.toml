@@ -23,5 +23,7 @@ binding = "REPORT_SESSIONS"
 id = "d68d367f9db54e5f8c5067c3cca0077b"
 
 [vars]
-LARK_API_URL = "https://open.feishu.cn/open-apis"
-CLAUDE_MODEL = "claude-sonnet-4-6"
+LARK_API_URL           = "https://open.larksuite.com/open-apis"
+CLAUDE_MODEL           = "claude-sonnet-4-6"
+FORKLIFT_PDI_DOC_TOKEN = "<从 API Explorer 拿到的叉车模板 obj_token>"
+LOADER_PDI_DOC_TOKEN   = "<从 API Explorer 拿到的装载机模板 obj_token>"
