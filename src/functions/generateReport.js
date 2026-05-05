@@ -1,18 +1,26 @@
-import { VEHICLE_TYPES, getChecklistForType } from '../data/checklists.js';
-
-const STATUS_ICON = { ok: '✓', low: '⚠ Low', leak: '⚠ Leak', dirty: '⚠ Dirty', missing: '✗ Missing', unreadable: '— Unreadable', 'n/a': '—', noted: '✓' };
+import { VEHICLE_TYPES } from '../data/checklists.js';
+import { getTemplate } from '../templates/index.js';
 
 export async function generateReport(session, env) {
   const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
   const reportType = session.report_type ?? 'SERVICE';
-
   const v = session.vehicle ?? {};
-  const vehicleLine = [v.model, v.serial ? `S/N: ${v.serial}` : null, v.hours ? `${v.hours}h` : null, v.type ? VEHICLE_TYPES[v.type] : null]
-    .filter(Boolean).join(' | ') || 'Vehicle not identified';
 
-  const typeLabel = reportType === 'PD' ? 'Pre-Delivery Inspection' : 'Service Report';
+  const vehicleLine = [
+    v.model,
+    v.serial ? `S/N: ${v.serial}` : null,
+    v.hours ? `${v.hours}h` : null,
+    v.type ? VEHICLE_TYPES[v.type] : null,
+  ].filter(Boolean).join(' | ') || 'Vehicle not identified';
 
-  // 按 check_id 汇总所有记录（同一项可能有多张图）
+  const template = await getTemplate(reportType, v.type ?? 'UNKNOWN');
+
+  const STATUS_ICON = {
+    ok: '✓', low: '⚠ Low', leak: '⚠ Leak', dirty: '⚠ Dirty',
+    missing: '✗ Missing', unreadable: '—', 'n/a': 'N/A', noted: '✓',
+  };
+
+  // 按 check_id 汇总记录
   const itemMap = {};
   for (const item of session.items) {
     const id = item.check_id || 'general';
@@ -22,29 +30,36 @@ export async function generateReport(session, env) {
 
   let body = '';
 
-  if (reportType === 'PD' && v.type && v.type !== 'UNKNOWN') {
-    // PD 报告：按标准检查项模板输出表格
-    const checklist = getChecklistForType(v.type);
-    body += 'CHECKLIST:\n';
-    for (const checkItem of checklist) {
-      const records = itemMap[checkItem.id];
-      if (records && records.length > 0) {
-        const latest = records[records.length - 1];
-        const icon = STATUS_ICON[latest.status] ?? latest.status;
-        body += `${icon.padEnd(12)} ${checkItem.label}\n`;
-        if (latest.reading) body += `             → ${latest.reading}\n`;
-      } else {
-        body += `${'—'.padEnd(12)} ${checkItem.label}\n`;
+  for (const section of template.sections) {
+    const isNA = section.na_for && section.na_for.includes(v.type);
+    const records = itemMap[section.id];
+
+    if (isNA) {
+      body += `N/A          ${section.label}\n`;
+    } else if (records && records.length > 0) {
+      const latest = records[records.length - 1];
+      const icon = STATUS_ICON[latest.status] ?? latest.status ?? '•';
+      body += `${icon.padEnd(12)} ${section.label}\n`;
+      if (latest.reading) body += `             → ${latest.reading}\n`;
+      // 额外记录（同一项多次）
+      if (records.length > 1) {
+        for (const extra of records.slice(0, -1)) {
+          if (extra.reading) body += `             → ${extra.reading}\n`;
+        }
       }
+    } else {
+      body += `${'—'.padEnd(12)} ${section.label}\n`;
     }
-  } else {
-    // Service 报告：按时间顺序列出所有记录
-    body += 'RECORDS:\n';
-    for (const item of session.items) {
-      const icon = STATUS_ICON[item.status] ?? item.status ?? '•';
-      const label = item.check_id ?? 'note';
-      const detail = item.reading ?? item.raw ?? '';
-      body += `${icon} [${label}] ${detail}\n`;
+  }
+
+  // 模板之外的额外记录（operator 做了模板没有的工作）
+  const templateIds = new Set(template.sections.map(s => s.id));
+  const extras = session.items.filter(i => !templateIds.has(i.check_id ?? 'general') || i.check_id === 'general');
+  if (extras.length > 0) {
+    body += '\nADDITIONAL WORK / NOTES:\n';
+    for (const i of extras) {
+      const icon = STATUS_ICON[i.status] ?? '•';
+      body += `${icon} [${i.check_id ?? 'note'}] ${i.reading ?? i.raw ?? ''}\n`;
     }
   }
 
@@ -57,5 +72,5 @@ export async function generateReport(session, env) {
     }
   }
 
-  return `📋 ${typeLabel}\n🕐 ${now}\n🔧 ${vehicleLine}\n${'─'.repeat(40)}\n${body}`;
+  return `📋 ${template.title}\n🕐 ${now}\n🔧 ${vehicleLine}\n${'─'.repeat(40)}\n${body}`;
 }
