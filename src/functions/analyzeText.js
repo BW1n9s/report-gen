@@ -7,24 +7,26 @@ export async function handleTextMessage({ userId, chatId, content, env }) {
   if (!text) return;
 
   try {
-    const analysis = await analyzeTextWithClaude(text, env);
+    const result = await analyzeTextWithClaude(text, env);
 
     const session = await getSession(userId, env);
+    if (result.check_id && result.check_id !== 'general' && !session.covered_checks.includes(result.check_id)) {
+      session.covered_checks.push(result.check_id);
+    }
     session.items.push({
       type: 'text',
-      original: text,
-      analysis,
+      check_id: result.check_id,
+      status: result.status,
+      reading: result.reading,
+      raw: text,
       timestamp: new Date().toISOString(),
     });
     await updateSession(userId, session, env);
 
     const count = session.items.length;
-
-    // 引用用户原文 + 显示解析结果
     await sendCard(chatId, {
-      header: { title: `✅ 记录 #${count} 已解析`, style: 'green' },
-      // 原文引用 + 解析结果
-      body: `💬 原文：\n"${text}"\n\n📋 解析结果：\n${analysis}`,
+      header: { title: `✅ 记录 #${count}`, style: 'green' },
+      body: `📋 ${result.check_id} — ${result.status}\n${result.reading}`,
       buttons: [
         { label: '检查占用', action: 'CHECKSTATUS', type: 'default' },
         { label: '结束', action: 'END', type: 'danger' },
