@@ -2,6 +2,18 @@ import { sendMessage, sendCard, updateItemCard } from '../services/lark.js';
 import { getSession, clearSession } from '../services/session.js';
 import { generateReport, generateReportAsLarkDoc } from './generateReport.js';
 
+async function getDoItemCount(userId, env) {
+  try {
+    const id   = env.IMAGE_DEDUP.idFromName(userId);
+    const stub = env.IMAGE_DEDUP.get(id);
+    const res  = await stub.fetch('http://do/get-items');
+    const data = await res.json();
+    return data.items?.length ?? 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 function normalizeReportType(raw) {
   if (!raw) return 'PDI';
   if (raw === 'PD') return 'PDI';
@@ -111,7 +123,8 @@ async function cmdSetType({ userId, chatId, type, env }) {
 async function cmdStatus({ userId, chatId, env }) {
   const session = await getSession(userId, env);
 
-  if (session.items.length === 0 && !session.report_type) {
+  const doCount = await getDoItemCount(userId, env);
+  if (doCount === 0 && session.items.length === 0 && !session.report_type) {
     await sendCard(chatId, {
       header: { title: '📭 No active record', style: 'grey' },
       body: 'Start a new inspection below.',
@@ -123,8 +136,8 @@ async function cmdStatus({ userId, chatId, env }) {
     return;
   }
 
-  const images = session.items.filter((i) => i.type === 'image').length;
-  const texts = session.items.filter((i) => i.type === 'text').length;
+  const images = doCount;
+  const texts  = session.items.filter((i) => i.type === 'text').length;
   const since = new Date(session.created_at).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
 
   const typeLabel = REPORT_TYPES[normalizeReportType(session.report_type)]?.label ?? session.report_type;
@@ -174,15 +187,17 @@ async function cmdAbort({ userId, chatId, env }) {
 async function cmdEnd({ userId, chatId, env }) {
   const session = await getSession(userId, env);
 
-  if (session.items.length === 0) {
+  const doCount = await getDoItemCount(userId, env);
+  if (doCount === 0 && session.items.length === 0) {
     await sendMessage(chatId, '📭 暂无记录，请先发送图片或文字。', env);
     return;
   }
 
   const reportType = normalizeReportType(session.report_type);
   const typeLabel  = REPORT_TYPES[reportType]?.label ?? reportType;
+  const totalCount = doCount + session.items.filter(i => i.type === 'text').length;
 
-  await sendMessage(chatId, `📝 正在生成 ${typeLabel} 报告（共 ${session.items.length} 条记录）…`, env);
+  await sendMessage(chatId, `📝 正在生成 ${typeLabel} 报告（共 ${totalCount} 条记录）…`, env);
 
   try {
     const report = await generateReport(session, env);

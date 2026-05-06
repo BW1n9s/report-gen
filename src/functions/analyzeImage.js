@@ -68,30 +68,38 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       await updateSession(userId, session, env);
     }
 
-    // DO /result — 先存一条（cardMsgId 待回填）
+    // DO /result — 先存一条（msgId 待回填）
     const doId   = env.IMAGE_DEDUP.idFromName(userId);
     const doStub = env.IMAGE_DEDUP.get(doId);
     const doRes  = await doStub.fetch('http://do/result', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        check_id:  result.check_id,
-        reading:   result.reading,
+        check_id: result.check_id,
+        reading:  result.reading,
         imageKey,
-        cardMsgId: null,
+        msgId: null,
       }),
     });
     const { count, itemId } = await doRes.json();
 
+    const patchMsgId = async (id) => doStub.fetch('http://do/item', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itemId, msgId: id }),
+    });
+
     if (np?.model) {
-      // 铭牌：纯文本回复，不发交互卡片
-      const txt = `已分析 ${count} 张｜📋 ${np.model}${np.serial ? ' S/N: ' + np.serial : ''}`;
-      await replyToMessage(messageId, JSON.stringify({ text: txt }), 'text', env);
+      // 铭牌：纯文本回复，回填 msgId 让 quote 也能找到 item
+      const txt     = `已分析 ${count} 张｜📋 ${np.model}${np.serial ? ' S/N: ' + np.serial : ''}`;
+      const txtResp = await replyToMessage(messageId, JSON.stringify({ text: txt }), 'text', env);
+      const txtMsgId = txtResp?.data?.message_id ?? null;
+      if (txtMsgId) await patchMsgId(txtMsgId);
       if (np.confirm_needed && np.confirm_prompt) {
         await replyToMessage(messageId, JSON.stringify({ text: `⚠️ ${np.confirm_prompt}` }), 'text', env);
       }
     } else {
-      // 普通检查项：发交互卡片（引用原图）
+      // 普通检查项：发交互卡片（引用原图），回填 msgId
       const label    = SECTION_LABEL[result.check_id] ?? result.check_id;
       const cardResp = await sendItemCard({
         messageId,
@@ -103,15 +111,7 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
         env,
       });
       const cardMsgId = cardResp?.data?.message_id ?? null;
-
-      // 回填 cardMsgId 到 DO
-      if (cardMsgId) {
-        await doStub.fetch('http://do/item', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ itemId, cardMsgId }),
-        });
-      }
+      if (cardMsgId) await patchMsgId(cardMsgId);
     }
 
   } catch (e) {

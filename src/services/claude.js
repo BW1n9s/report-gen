@@ -68,8 +68,8 @@ export const PROMPT_TEXT = `Extract inspection note into JSON only, no other tex
 
 // ─── API Call Helper ──────────────────────────────────────────────────────────
 
-// timeoutMs is per-attempt (not total); callers choose based on their budget
-async function callClaude(payload, env, timeoutMs = 25000) {
+// timeoutMs is per-attempt (not total); maxAttempts=1 for image analysis (no retry on timeout)
+async function callClaude(payload, env, timeoutMs = 25000, maxAttempts = 4) {
   const data = await withRetry(async () => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -107,7 +107,7 @@ async function callClaude(payload, env, timeoutMs = 25000) {
       );
     }
     return response.json();
-  });
+  }, { maxAttempts });
 
   return data.content[0].text;
 }
@@ -132,7 +132,7 @@ export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000, 
     ]}],
   };
 
-  const raw = await callClaude(payload, env, timeoutMs);
+  const raw = await callClaude(payload, env, 20000, 1); // 20s, no retry for image analysis
   try {
     const clean = raw.replace(/```json|```/g, '').trim();
     return JSON.parse(clean);

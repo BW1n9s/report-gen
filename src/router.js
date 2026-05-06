@@ -100,10 +100,10 @@ export async function routeMessage(event, env) {
         const doId   = env.IMAGE_DEDUP.idFromName(userId);
         const doStub = env.IMAGE_DEDUP.get(doId);
 
-        const byCardRes = await doStub.fetch(
-          `http://do/item-by-card?cardMsgId=${encodeURIComponent(parentId)}`,
+        const byMsgRes = await doStub.fetch(
+          `http://do/item-by-msg?msgId=${encodeURIComponent(parentId)}`,
         );
-        const { item } = await byCardRes.json();
+        const { item } = await byMsgRes.json();
 
         if (item) {
           const { analyzeCorrection } = await import('./services/claude.js');

@@ -1,5 +1,5 @@
 // ImageDedupDO
-// 职责：去重 + 按序存 items + cardMsgId↔itemId 映射 + item 更新
+// 职责：去重 + 按序存 items + msgId↔itemId 映射 + item 更新
 
 export class ImageDedupDO {
   constructor(state, env) {
@@ -37,8 +37,8 @@ export class ImageDedupDO {
       return Response.json({ isNew: true });
     }
 
-    // POST /result — 追加 item，存 cardMsgId→itemId 映射
-    // body: { check_id, reading, imageKey, cardMsgId }
+    // POST /result — 追加 item，存 msgId→itemId 映射
+    // body: { check_id, reading, imageKey, msgId }
     // response: { count, itemId }
     if (request.method === 'POST' && url.pathname === '/result') {
       const payload = await request.json();
@@ -53,42 +53,49 @@ export class ImageDedupDO {
         status:    'pending',
         note:      null,
         imageKey:  payload.imageKey,
-        cardMsgId: payload.cardMsgId ?? null,
+        msgId:     payload.msgId ?? null,
+        cardMsgId: payload.msgId ?? null,   // 向后兼容（card actions 还用这个查）
         timestamp: new Date().toISOString(),
       });
       await this.state.storage.put('items', items);
 
-      if (payload.cardMsgId) {
-        await this.state.storage.put(`card:${payload.cardMsgId}`, itemId);
+      if (payload.msgId) {
+        await this.state.storage.put(`msg:${payload.msgId}`, itemId);
       }
 
       return Response.json({ count: items.length, itemId });
     }
 
-    // PATCH /item — 更新 item（OK/NG/Correction）
-    // body: { itemId, status?, reading?, note?, cardMsgId? }
+    // PATCH /item — 更新 item（OK/NG/Correction/msgId 回填）
+    // body: { itemId, status?, reading?, note?, msgId?, cardMsgId? }
     if (request.method === 'PATCH' && url.pathname === '/item') {
-      const { itemId, status, reading, note, cardMsgId } = await request.json();
+      const { itemId, status, reading, note, msgId, cardMsgId } = await request.json();
       const items = (await this.state.storage.get('items')) ?? [];
       const idx   = items.findIndex(i => i.itemId === itemId);
       if (idx === -1) return Response.json({ ok: false, error: 'item not found' });
 
-      if (status    !== undefined) items[idx].status   = status;
-      if (reading   !== undefined) items[idx].reading  = reading;
-      if (note      !== undefined) items[idx].note     = note;
-      if (cardMsgId) {
-        items[idx].cardMsgId = cardMsgId;
-        await this.state.storage.put(`card:${cardMsgId}`, itemId);
+      if (status   !== undefined) items[idx].status   = status;
+      if (reading  !== undefined) items[idx].reading  = reading;
+      if (note     !== undefined) items[idx].note     = note;
+
+      // 支持 msgId 或 cardMsgId（两种调用方式）
+      const newMsgId = msgId ?? cardMsgId ?? null;
+      if (newMsgId) {
+        items[idx].msgId     = newMsgId;
+        items[idx].cardMsgId = newMsgId;   // 向后兼容
+        await this.state.storage.put(`msg:${newMsgId}`, itemId);
       }
+
       await this.state.storage.put('items', items);
       return Response.json({ ok: true, item: items[idx] });
     }
 
-    // GET /item-by-card?cardMsgId=xxx — 通过卡片消息 ID 查 item
-    if (request.method === 'GET' && url.pathname === '/item-by-card') {
-      const cardMsgId = url.searchParams.get('cardMsgId');
-      if (!cardMsgId) return Response.json({ item: null });
-      const itemId = await this.state.storage.get(`card:${cardMsgId}`);
+    // GET /item-by-msg?msgId=xxx — 通过消息 ID 查 item（兼容旧路径 /item-by-card）
+    if (request.method === 'GET' &&
+        (url.pathname === '/item-by-msg' || url.pathname === '/item-by-card')) {
+      const msgId = url.searchParams.get('msgId') ?? url.searchParams.get('cardMsgId');
+      if (!msgId) return Response.json({ item: null });
+      const itemId = await this.state.storage.get(`msg:${msgId}`);
       if (!itemId) return Response.json({ item: null });
       const items = (await this.state.storage.get('items')) ?? [];
       const item  = items.find(i => i.itemId === itemId) ?? null;

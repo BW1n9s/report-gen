@@ -1,17 +1,26 @@
 // ─── Token ────────────────────────────────────────────────────────────────────
 
+// Module-level token cache（热实例复用，冷启动重新拿）
+let _cachedToken = null;
+let _tokenExpiresAt = 0;
+
 export async function getToken(env) {
+  if (_cachedToken && Date.now() < _tokenExpiresAt) {
+    return _cachedToken;
+  }
   const res = await fetch(`${env.LARK_API_URL}/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      app_id: env.FEISHU_APP_ID,
+      app_id:     env.FEISHU_APP_ID,
       app_secret: env.FEISHU_APP_SECRET,
     }),
   });
   const data = await res.json();
   if (data.code !== 0) throw new Error(`getToken failed: ${data.msg}`);
-  return data.tenant_access_token;
+  _cachedToken    = data.tenant_access_token;
+  _tokenExpiresAt = Date.now() + 6900 * 1000; // 6900s（token有效期7200s，留5分钟缓冲）
+  return _cachedToken;
 }
 
 // ─── Image ────────────────────────────────────────────────────────────────────
