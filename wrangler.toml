@@ -27,8 +27,8 @@ name        = "IMAGE_DEDUP"
 class_name  = "ImageDedupDO"
 
 [[migrations]]
-tag             = "v1"
-new_classes     = ["ImageDedupDO"]
+tag                = "v1"
+new_sqlite_classes = ["ImageDedupDO"]
 
 [vars]
 LARK_API_URL             = "https://open.larksuite.com/open-apis"
