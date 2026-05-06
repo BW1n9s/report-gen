@@ -22,6 +22,14 @@ head_sampling_rate = 1
 binding = "REPORT_SESSIONS"
 id = "d68d367f9db54e5f8c5067c3cca0077b"
 
+[[durable_objects.bindings]]
+name        = "IMAGE_DEDUP"
+class_name  = "ImageDedupDO"
+
+[[migrations]]
+tag             = "v1"
+new_classes     = ["ImageDedupDO"]
+
 [vars]
 LARK_API_URL             = "https://open.larksuite.com/open-apis"
 CLAUDE_MODEL             = "claude-sonnet-4-6"

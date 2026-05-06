@@ -1,6 +1,6 @@
 // NOTE: withUserQueue is used only for report generation (END command),
-// NOT for image processing. Images are processed concurrently — one Worker
-// invocation per image — coordinated via batchTracker.js instead.
+// NOT for image processing. Images are processed concurrently and deduplicated
+// via ImageDedupDO instead.
 import { sleep } from './retry.js';
 
 const LOCK_TTL_SEC = 60;

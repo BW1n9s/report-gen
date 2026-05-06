@@ -2,15 +2,27 @@ import { analyzeImage } from './functions/analyzeImage.js';
 import { handleTextMessage } from './functions/analyzeText.js';
 import { handleCommand } from './functions/commands.js';
 import { parseCorrection } from './utils/parseCorrection.js';
-import { registerImage, setStatusMsgId } from './utils/batchTracker.js';
 import { sendMessage, replyToMessage } from './services/lark.js';
 import { getSession, updateSession } from './services/session.js';
 
 const COMMAND_KEYWORDS = new Set([
   'START', 'CHECKSTATUS', 'END', 'ABORT',
   '开始', '检查占用', '结束', '中断',
-  'PD', 'SERVICE',
+  'PDI', 'PD', 'SERVICE',
 ]);
+
+// 通过 DO 检查 imageKey 是否已处理过（原子操作）
+async function isDuplicate(env, userId, imageKey) {
+  const id   = env.IMAGE_DEDUP.idFromName(userId);
+  const stub = env.IMAGE_DEDUP.get(id);
+  const res  = await stub.fetch('http://do/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ imageKey }),
+  });
+  const { isNew } = await res.json();
+  return !isNew;
+}
 
 export async function routeMessage(event, env) {
   try {
@@ -19,37 +31,29 @@ export async function routeMessage(event, env) {
     if (!message || !sender) return;
     if (sender.sender_type !== 'user') return;
 
-    const userId = sender.sender_id?.open_id;
-    const chatId = message.chat_id;
+    const userId      = sender.sender_id?.open_id;
+    const chatId      = message.chat_id;
     const messageType = message.message_type;
     let content;
     try { content = JSON.parse(message.content ?? '{}'); } catch { content = {}; }
 
     if (messageType === 'image') {
       const messageId = message.message_id;
-      const imageKey = content.image_key;
+      const imageKey  = content.image_key;
+
+      if (!imageKey) return;
+
+      const duplicate = await isDuplicate(env, userId, imageKey);
+      if (duplicate) {
+        console.log(`[router] duplicate imageKey ${imageKey}, skipping`);
+        return;
+      }
 
       try {
-        const { isNew } = await registerImage(
-          env.REPORT_SESSIONS, userId, imageKey, messageId,
-        );
-
-        if (isNew) {
-          // First image in this batch — send ONE status message
-          const statusResp = await sendMessage(chatId, '📸 已收到照片，正在分析...', env);
-          const newStatusMsgId = statusResp?.data?.message_id;
-          if (newStatusMsgId) {
-            await setStatusMsgId(env.REPORT_SESSIONS, userId, newStatusMsgId);
-          }
-        }
-        // Subsequent images: no message sent here — status updated in analyzeImage
-
         const session = await getSession(userId, env);
         await analyzeImage(imageKey, messageId, session, userId, env);
-
       } catch (err) {
         console.error('[router] image processing error:', err);
-        // Only send error reply if it's a real failure, not a batch-window issue
         try {
           await replyToMessage(
             messageId,
@@ -87,7 +91,7 @@ export async function routeMessage(event, env) {
       }
 
       const text = (content.text ?? '').trim();
-      const ctx = { message, userId, chatId, content, env };
+      const ctx  = { message, userId, chatId, content, env };
       if (text.startsWith('/') || COMMAND_KEYWORDS.has(text)) {
         await handleCommand({ text, userId, chatId, env });
       } else {
@@ -101,18 +105,12 @@ export async function routeMessage(event, env) {
 
 export async function routeCardAction(event, env) {
   try {
-    const e = event.event ?? {};
+    const e      = event.event ?? {};
     const action = e.action?.value?.action;
     const chatId = e.context?.open_chat_id;
     const userId = e.operator?.open_id;
 
-    console.log('[CardAction] action:', action, 'userId:', userId, 'chatId:', chatId);
-
-    if (!action || !userId || !chatId) {
-      console.warn('[CardAction] missing required fields', { action, userId, chatId });
-      return;
-    }
-
+    if (!action || !userId || !chatId) return;
     await handleCommand({ text: action, userId, chatId, env });
   } catch (e) {
     console.error('CardAction error:', e);
