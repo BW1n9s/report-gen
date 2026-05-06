@@ -49,10 +49,25 @@ export async function generateReport(session, env) {
   ].filter(Boolean).join(' | ') || 'Vehicle not identified';
 
   const template = getTemplate(reportType, vehicleType);
-  const itemMap  = buildItemMap(session.items);
-  const issues   = [];
 
-  // 不进入报告正文的 check_id（仅用于车辆识别）
+  // items 从 DO 读取（单线程写入，无并发丢失）；fallback 到 session.items
+  let items = session.items ?? [];
+  if (env.IMAGE_DEDUP && session.user_id) {
+    try {
+      const id   = env.IMAGE_DEDUP.idFromName(session.user_id);
+      const stub = env.IMAGE_DEDUP.get(id);
+      const res  = await stub.fetch('http://do/get-items');
+      const data = await res.json();
+      if (Array.isArray(data.items) && data.items.length > 0) {
+        items = data.items;
+      }
+    } catch (e) {
+      console.warn('[generateReport] DO read failed, using session.items:', e.message);
+    }
+  }
+
+  const itemMap  = buildItemMap(items);
+  const issues   = [];
   const SKIP_IDS = new Set(['nameplate', 'general']);
 
   let body = '';
@@ -60,7 +75,6 @@ export async function generateReport(session, env) {
   for (const section of template.sections) {
     if (section.id === 'basic_info') continue;
 
-    // Section 整体对该车型 N/A
     if (Array.isArray(section.na_for) && section.na_for.includes(vehicleType)) {
       body += `N/A          ${section.label}\n`;
       continue;
@@ -73,7 +87,6 @@ export async function generateReport(session, env) {
       const icon = STATUS_ICON[latest.status] ?? latest.status ?? '•';
       body += `${icon.padEnd(12)} ${section.label}\n`;
       if (latest.reading) body += `             → ${latest.reading}\n`;
-      // 同一 section 多条记录（多张照片）
       for (const extra of records.slice(0, -1)) {
         if (extra.reading) body += `             → ${extra.reading}\n`;
       }
@@ -85,9 +98,8 @@ export async function generateReport(session, env) {
     }
   }
 
-  // 模板外额外记录（排除 nameplate 和 general）
   const templateIds = new Set(template.sections.map(s => s.id));
-  const extras = session.items.filter(
+  const extras = items.filter(
     i => !SKIP_IDS.has(i.check_id ?? 'general') && !templateIds.has(i.check_id ?? 'general'),
   );
   if (extras.length > 0) {
@@ -97,7 +109,6 @@ export async function generateReport(session, env) {
     }
   }
 
-  // 异常汇总
   if (issues.length > 0) {
     body += '\nISSUES NOTED:\n';
     for (const issue of issues) body += `⚠ ${issue}\n`;
