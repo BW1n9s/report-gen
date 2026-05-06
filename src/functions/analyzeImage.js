@@ -1,4 +1,4 @@
-import { getToken, downloadImage, replyToMessage } from '../services/lark.js';
+import { getToken, downloadImage, replyToMessage, sendItemCard } from '../services/lark.js';
 import { analyzeImageWithClaude } from '../services/claude.js';
 import { updateSession } from '../services/session.js';
 
@@ -22,13 +22,12 @@ const SECTION_LABEL = {
 
 export async function analyzeImage(imageKey, messageId, session, userId, env) {
   try {
-    // 分析前存一次 session（确保车辆信息持久化）
     await updateSession(userId, session, env);
 
     const token     = await getToken(env);
     const imageData = await downloadImage(messageId, imageKey, token, env);
 
-    // 构建车辆上下文
+    // 车辆上下文
     let vehicleContext = null;
     if (session.vehicle) {
       const parts = [];
@@ -44,11 +43,11 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
 
     const result = await analyzeImageWithClaude(imageData, env, 25000, vehicleContext);
 
-    // 铭牌处理 — 只更新 KV session 里的 vehicle（不频繁写，无并发问题）
+    // 铭牌处理
     const np = result.nameplate;
     if (np?.model) {
       if (!session.vehicle) session.vehicle = {};
-      if (!session.vehicle.model)   session.vehicle.model   = np.model;
+      if (!session.vehicle.model)  session.vehicle.model  = np.model;
       if (!session.vehicle.serial && np.serial) {
         session.vehicle.serial       = np.serial;
         session.vehicle.serialSource = 'NAMEPLATE';
@@ -61,7 +60,7 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       await updateSession(userId, session, env);
     }
 
-    // covered_checks 更新（KV session，不频繁写）
+    // covered_checks
     const checkId = result.check_id;
     if (checkId && !['nameplate', 'general'].includes(checkId)
         && !session.covered_checks.includes(checkId)) {
@@ -69,46 +68,50 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       await updateSession(userId, session, env);
     }
 
-    // items 存入 DO（单线程，无并发写冲突）
+    // DO /result — 先存一条（cardMsgId 待回填）
     const doId   = env.IMAGE_DEDUP.idFromName(userId);
     const doStub = env.IMAGE_DEDUP.get(doId);
     const doRes  = await doStub.fetch('http://do/result', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        check_id: result.check_id,
-        status:   result.status,
-        reading:  result.reading,
+        check_id:  result.check_id,
+        reading:   result.reading,
         imageKey,
+        cardMsgId: null,
       }),
     });
-    const { count } = await doRes.json();
+    const { count, itemId } = await doRes.json();
 
-    // 回复文本：进度 + 分析结果
-    let replyText;
     if (np?.model) {
-      replyText = `已分析 ${count} 张｜📋 ${np.model}${np.serial ? ' S/N: ' + np.serial : ''}`;
+      // 铭牌：纯文本回复，不发交互卡片
+      const txt = `已分析 ${count} 张｜📋 ${np.model}${np.serial ? ' S/N: ' + np.serial : ''}`;
+      await replyToMessage(messageId, JSON.stringify({ text: txt }), 'text', env);
+      if (np.confirm_needed && np.confirm_prompt) {
+        await replyToMessage(messageId, JSON.stringify({ text: `⚠️ ${np.confirm_prompt}` }), 'text', env);
+      }
     } else {
-      const label   = SECTION_LABEL[result.check_id] ?? result.check_id;
-      const reading = result.reading ? ` → ${result.reading}` : '';
-      replyText = `已分析 ${count} 张｜${label}${reading}`;
-    }
-
-    await replyToMessage(
-      messageId,
-      JSON.stringify({ text: replyText }),
-      'text',
-      env,
-    );
-
-    // 序列号不确定时额外提示
-    if (np?.confirm_needed && np?.confirm_prompt) {
-      await replyToMessage(
+      // 普通检查项：发交互卡片（引用原图）
+      const label    = SECTION_LABEL[result.check_id] ?? result.check_id;
+      const cardResp = await sendItemCard({
         messageId,
-        JSON.stringify({ text: `⚠️ ${np.confirm_prompt}` }),
-        'text',
+        chatId:  session.chatId ?? null,
+        count,
+        label,
+        reading: result.reading ?? '',
+        itemId,
         env,
-      );
+      });
+      const cardMsgId = cardResp?.data?.message_id ?? null;
+
+      // 回填 cardMsgId 到 DO
+      if (cardMsgId) {
+        await doStub.fetch('http://do/item', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemId, cardMsgId }),
+        });
+      }
     }
 
   } catch (e) {
@@ -116,8 +119,7 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
     await replyToMessage(
       messageId,
       JSON.stringify({ text: `❌ 分析失败: ${e.message}` }),
-      'text',
-      env,
+      'text', env,
     ).catch(() => {});
   }
 }

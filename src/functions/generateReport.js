@@ -7,14 +7,11 @@ import {
 } from '../services/lark.js';
 
 const STATUS_ICON = {
-  ok:          '✓',
-  low:         '⚠ Low',
-  leak:        '⚠ Leak',
-  dirty:       '⚠ Dirty',
-  missing:     '✗ Missing',
-  unreadable:  '—',
-  'n/a':       'N/A',
-  noted:       '✓',
+  pending:   '✓',
+  ok:        '✓',
+  ng:        '✗ NG',
+  corrected: '✓✏',
+  'n/a':     'N/A',
 };
 
 // 兼容旧 session（report_type 可能是 'PD'）
@@ -90,8 +87,8 @@ export async function generateReport(session, env) {
       for (const extra of records.slice(0, -1)) {
         if (extra.reading) body += `             → ${extra.reading}\n`;
       }
-      if (['low', 'leak', 'dirty', 'missing'].includes(latest.status)) {
-        issues.push(`[${section.id}] ${latest.reading}`);
+      if (latest.status === 'ng') {
+        issues.push(`[${section.id}] ${latest.reading}${latest.note ? ' — ' + latest.note : ''}`);
       }
     } else {
       body += `${'—'.padEnd(12)} ${section.label}\n`;

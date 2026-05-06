@@ -1,4 +1,4 @@
-import { sendMessage, sendCard } from '../services/lark.js';
+import { sendMessage, sendCard, updateItemCard } from '../services/lark.js';
 import { getSession, clearSession } from '../services/session.js';
 import { generateReport, generateReportAsLarkDoc } from './generateReport.js';
 
@@ -205,5 +205,88 @@ async function cmdEnd({ userId, chatId, env }) {
   } catch (e) {
     console.error('Generate report error:', e);
     await sendMessage(chatId, `❌ 报告生成失败：${e.message}`, env);
+  }
+}
+
+// ─── Item Card Actions ────────────────────────────────────────────────────────
+
+const ITEM_SECTION_LABEL = {
+  attachment_accessories:'附件配件', visual_structure:'外观结构',
+  fluid_levels:'油液液位', engine_mechanical:'发动机机械',
+  electrical_system:'电气系统', hydraulic_system:'液压系统',
+  mast_fork_chain:'门架链条', loader_arm_axle:'大臂车桥',
+  steering_brake_dynamic:'转向刹车', tyre_wheel:'轮胎车轮',
+  safety_functions:'安全功能', maintenance_work:'保养工作',
+  final_result:'最终结果', general:'其他',
+};
+
+export async function handleItemCardAction({ action, itemId, formValues, userId, chatId, env }) {
+  if (!itemId) return;
+
+  const doId   = env.IMAGE_DEDUP.idFromName(userId);
+  const doStub = env.IMAGE_DEDUP.get(doId);
+
+  const itemsRes    = await doStub.fetch('http://do/get-items');
+  const { items }   = await itemsRes.json();
+  const item        = items?.find(i => i.itemId === itemId);
+  if (!item) return;
+
+  const label = ITEM_SECTION_LABEL[item.check_id] ?? item.check_id;
+  const count = items.length;
+
+  const patch = async (fields) => doStub.fetch('http://do/item', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ itemId, ...fields }),
+  });
+
+  const updateCard = async (overrides = {}) => {
+    if (!item.cardMsgId) return;
+    await updateItemCard({
+      cardMsgId: item.cardMsgId, count, label,
+      reading: item.reading, itemId,
+      status: item.status, note: item.note,
+      ...overrides, env,
+    });
+  };
+
+  if (action === 'IMG_OK') {
+    await patch({ status: 'ok' });
+    item.status = 'ok';
+    await updateCard();
+  }
+
+  if (action === 'IMG_NG') {
+    await updateCard({ showInput: 'ng' });
+  }
+
+  if (action === 'IMG_CORRECT') {
+    await updateCard({ showInput: 'correction' });
+  }
+
+  if (action === 'IMG_NG_SUBMIT') {
+    const note = formValues.ng_note ?? '';
+    await patch({ status: 'ng', note });
+    item.status = 'ng';
+    item.note   = note;
+    await updateCard();
+  }
+
+  if (action === 'IMG_CORRECT_SUBMIT') {
+    const { analyzeCorrection } = await import('../services/claude.js');
+    const corrNote  = formValues.correction_note ?? '';
+    const corrResult = await analyzeCorrection(corrNote, item.reading, env);
+    const newReading = corrResult.reading ?? item.reading;
+    const newNote    = corrResult.note ?? corrNote;
+    const newStatus  = corrResult.action === 'ng' ? 'ng' : 'corrected';
+    await patch({ status: newStatus, reading: newReading, note: newNote });
+    item.reading = newReading;
+    item.note    = newNote;
+    item.status  = newStatus;
+    await updateCard();
+  }
+
+  if (action === 'IMG_CANCEL') {
+    await updateCard(); // redraw without showInput
   }
 }

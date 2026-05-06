@@ -7,36 +7,34 @@ export const PROMPT_IMAGE = `You are a forklift/loader inspection assistant. Ana
 Output schema:
 {
   "check_id": "<section id from list below>",
-  "status": "ok|low|leak|dirty|missing|unreadable|n/a",
-  "reading": "<objective fact only, max 12 words>",
+  "reading": "<objective observation only, max 12 words, no judgement>",
   "nameplate": null
 }
 
 Section IDs — pick the single best match:
   nameplate              — data plate, serial number plate, rating plate
-  attachment_accessories — keys, manuals, charger, forks, attachments present/missing
-  visual_structure       — body panels, paint, frame, overhead guard, decals, wiring routing
+  attachment_accessories — keys, manuals, charger, forks, attachments
+  visual_structure       — body panels, paint, frame, overhead guard, decals, wiring
   fluid_levels           — any fluid level, coolant, fuel, hydraulic oil, fluid leaks
-  engine_mechanical      — engine start/idle, belts, air filter, exhaust, engine mounts
-  electrical_system      — battery terminals, lights, horn, dashboard display, Curtis faults
-  hydraulic_system       — pump noise, hoses, cylinders, lift/tilt/sideshift/valve function
-  mast_fork_chain        — mast rails, rollers, lift chains, fork arms, carriage (forklifts)
-  loader_arm_axle        — loader arm, axle condition, bucket pins, locking pins (loaders)
-  steering_brake_dynamic — drive/travel test, service brake, park brake, steering, noise
-  tyre_wheel             — tyre condition, pressure, wear, cuts, wheel nuts, rim, torque
-  safety_functions       — seat switch, interlock, reverse alarm, beacon, mirrors, e-stop
-  maintenance_work       — completed work: oil change, filter, grease, lube, tyre check
-  final_result           — overall pass/fail, ready-for-delivery decision, test complete
+  engine_mechanical      — engine start/idle, belts, air filter, exhaust, mounts
+  electrical_system      — battery, lights, horn, dashboard, Curtis controller
+  hydraulic_system       — pump, hoses, cylinders, lift/tilt/sideshift/valve
+  mast_fork_chain        — mast rails, chains, fork arms, carriage (forklifts)
+  loader_arm_axle        — loader arm, axles, bucket pins (loaders)
+  steering_brake_dynamic — drive test, brakes, steering, noise/vibration
+  tyre_wheel             — tyre, pressure, wear, wheel nuts, rim
+  safety_functions       — seat switch, interlock, reverse alarm, beacon, mirrors
+  maintenance_work       — completed work: oil change, filter, grease, lube
+  final_result           — overall test complete, ready-for-delivery
   general                — cannot match any section above
 
-If photo shows a nameplate or data plate, set check_id="nameplate" and populate nameplate:
+Nameplate schema (when check_id="nameplate"):
 {
   "check_id": "nameplate",
-  "status": "ok",
   "reading": "nameplate visible",
   "nameplate": {
     "model": "string or null",
-    "serial": "string or null — ONLY from SERIAL NO. field on plate",
+    "serial": "string or null — ONLY from SERIAL NO. field",
     "capacity_kg": number or null,
     "year": "YYYY or null",
     "voltage": number or null,
@@ -47,10 +45,19 @@ If photo shows a nameplate or data plate, set check_id="nameplate" and populate 
 }
 
 Rules:
-- reading = objective fact only, no recommendations, no filler phrases
-- status "n/a" = item not applicable for this vehicle type
-- uncertain digits: "3[6?]BE01543", set confirm_needed=true, confirm_prompt="Please confirm digit 2 of serial"
-- If vehicle context says ELECTRIC: engine_oil/transmission_oil/fuel → status "n/a"`;
+- reading = objective observation only, never use ok/good/normal/bad/damaged
+- uncertain digits in serial: "3[6?]BE01543", confirm_needed=true
+- If ELECTRIC context: note engine/transmission items as not applicable in reading`;
+
+export const PROMPT_CORRECTION = `User is correcting or annotating an inspection photo.
+Extract the correction into JSON only, no other text.
+{
+  "action": "ng | correction",
+  "reading": "corrected observation, max 15 words, objective",
+  "note": "additional context if any, max 15 words, or null"
+}
+action "ng" = user says item is defective/abnormal/damaged/needs attention
+action "correction" = user is clarifying what the item actually is or adding detail`;
 
 export const PROMPT_TEXT = `Extract inspection note into JSON only, no other text.
 {
@@ -131,6 +138,24 @@ export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000, 
     return JSON.parse(clean);
   } catch {
     return { check_id: 'general', status: 'unreadable', reading: 'parse error', nameplate: null };
+  }
+}
+
+export async function analyzeCorrection(userText, originalReading, env) {
+  const payload = {
+    model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
+    max_tokens: 120,
+    system: PROMPT_CORRECTION,
+    messages: [{
+      role: 'user',
+      content: `Original reading: "${originalReading}"\nUser correction: "${userText}"`,
+    }],
+  };
+  const raw = await callClaude(payload, env, 10000);
+  try {
+    return JSON.parse(raw.replace(/```json|```/g, '').trim());
+  } catch {
+    return { action: 'correction', reading: userText.slice(0, 80), note: null };
   }
 }
 

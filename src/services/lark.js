@@ -232,3 +232,157 @@ export async function updateTextMessage(messageId, text, env) {
   if (data.code !== 0) console.error('[lark] updateTextMessage failed:', JSON.stringify(data));
   return data;
 }
+
+// ─── Item Result Card ─────────────────────────────────────────────────────────
+
+/**
+ * 发送单张图片的分析结果卡片（引用原图，带 OK/NG/Correction 按键）
+ * status: 'pending' | 'ok' | 'ng' | 'corrected'
+ * showInput: null | 'ng' | 'correction'
+ */
+export async function sendItemCard({ messageId, chatId, count, label, reading,
+  itemId, status = 'pending', note = null, showInput = null, env }) {
+
+  const token = await getToken(env);
+  const card  = buildItemCard({ count, label, reading, itemId, status, note, showInput });
+
+  const res = await fetch(
+    `${env.LARK_API_URL}/im/v1/messages/${messageId}/reply`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ content: JSON.stringify(card), msg_type: 'interactive' }),
+    },
+  );
+  return res.json();
+}
+
+/**
+ * 更新已发送的 item 卡片
+ */
+export async function updateItemCard({ cardMsgId, count, label, reading,
+  itemId, status, note = null, showInput = null, env }) {
+
+  const token = await getToken(env);
+  const card  = buildItemCard({ count, label, reading, itemId, status, note, showInput });
+
+  const res = await fetch(
+    `${env.LARK_API_URL}/im/v1/messages/${cardMsgId}/content`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ content: JSON.stringify(card) }),
+    },
+  );
+  return res.json();
+}
+
+function buildItemCard({ count, label, reading, itemId, status, note, showInput }) {
+  const headerMap = {
+    pending:   { color: 'blue',   badge: `已分析 ${count} 张` },
+    ok:        { color: 'green',  badge: `已分析 ${count} 张 ✓` },
+    ng:        { color: 'red',    badge: `已分析 ${count} 张 ✗ NG` },
+    corrected: { color: 'yellow', badge: `已分析 ${count} 张 ✏️` },
+  };
+  const h = headerMap[status] ?? headerMap.pending;
+
+  const elements = [];
+
+  const noteText = note ? `\n📝 ${note}` : '';
+  elements.push({
+    tag: 'div',
+    text: { tag: 'lark_md', content: `**${label}**\n${reading}${noteText}` },
+  });
+
+  if (showInput === 'ng') {
+    elements.push({
+      tag: 'input',
+      placeholder: { tag: 'plain_text', content: '描述问题（如：漏油、损坏、缺失）' },
+      name: 'ng_note',
+    });
+    elements.push({
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button', type: 'danger',
+          text: { tag: 'plain_text', content: '确认 NG' },
+          value: { action: 'IMG_NG_SUBMIT', itemId },
+          form_value: { ng_note: '' },
+        },
+        {
+          tag: 'button', type: 'default',
+          text: { tag: 'plain_text', content: '取消' },
+          value: { action: 'IMG_CANCEL', itemId },
+        },
+      ],
+    });
+  } else if (showInput === 'correction') {
+    elements.push({
+      tag: 'input',
+      placeholder: { tag: 'plain_text', content: '补充说明（如：这是液压油尺，液位正常）' },
+      name: 'correction_note',
+    });
+    elements.push({
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button', type: 'primary',
+          text: { tag: 'plain_text', content: '提交修正' },
+          value: { action: 'IMG_CORRECT_SUBMIT', itemId },
+          form_value: { correction_note: '' },
+        },
+        {
+          tag: 'button', type: 'default',
+          text: { tag: 'plain_text', content: '取消' },
+          value: { action: 'IMG_CANCEL', itemId },
+        },
+      ],
+    });
+  } else if (status === 'pending' || status === 'ok') {
+    elements.push({
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button', type: 'default',
+          text: { tag: 'plain_text', content: 'OK ✓' },
+          value: { action: 'IMG_OK', itemId },
+        },
+        {
+          tag: 'button', type: 'danger',
+          text: { tag: 'plain_text', content: 'NG ✗' },
+          value: { action: 'IMG_NG', itemId },
+        },
+        {
+          tag: 'button', type: 'default',
+          text: { tag: 'plain_text', content: '修正 ✏️' },
+          value: { action: 'IMG_CORRECT', itemId },
+        },
+      ],
+    });
+  } else if (status === 'ng' || status === 'corrected') {
+    elements.push({
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button', type: 'default',
+          text: { tag: 'plain_text', content: '重新编辑' },
+          value: { action: 'IMG_CORRECT', itemId },
+        },
+        {
+          tag: 'button', type: 'default',
+          text: { tag: 'plain_text', content: '标回 OK' },
+          value: { action: 'IMG_OK', itemId },
+        },
+      ],
+    });
+  }
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title:    { tag: 'plain_text', content: h.badge },
+      template: h.color,
+    },
+    elements,
+  };
+}
