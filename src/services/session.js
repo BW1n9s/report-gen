@@ -34,4 +34,10 @@ export async function updateSession(userId, session, env) {
 
 export async function clearSession(userId, env) {
   await env.REPORT_SESSIONS.delete(PREFIX + userId);
+  // DO 状态一并清空
+  try {
+    const id   = env.IMAGE_DEDUP.idFromName(userId);
+    const stub = env.IMAGE_DEDUP.get(id);
+    await stub.fetch('http://do/reset', { method: 'DELETE' });
+  } catch (_) {}
 }

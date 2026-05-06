@@ -12,13 +12,13 @@ const COMMAND_KEYWORDS = new Set([
 ]);
 
 // 通过 DO 检查 imageKey 是否已处理过（原子操作）
-async function isDuplicate(env, userId, imageKey) {
+async function isDuplicate(env, userId, imageKey, chatId) {
   const id   = env.IMAGE_DEDUP.idFromName(userId);
   const stub = env.IMAGE_DEDUP.get(id);
   const res  = await stub.fetch('http://do/check', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ imageKey }),
+    body: JSON.stringify({ imageKey, chatId, userId }),
   });
   const { isNew } = await res.json();
   return !isNew;
@@ -43,7 +43,7 @@ export async function routeMessage(event, env) {
 
       if (!imageKey) return;
 
-      const duplicate = await isDuplicate(env, userId, imageKey);
+      const duplicate = await isDuplicate(env, userId, imageKey, chatId);
       if (duplicate) {
         console.log(`[router] duplicate imageKey ${imageKey}, skipping`);
         return;

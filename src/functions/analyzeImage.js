@@ -26,19 +26,18 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
 
     const result = await analyzeImageWithClaude(imageData, env, 25000, vehicleContext);
 
-    // 铭牌处理 — 更新 session.vehicle
+    // 铭牌处理
     const nameplateData = result.nameplate;
     if (nameplateData?.model) {
       if (!session.vehicle) session.vehicle = {};
-      if (nameplateData.model && !session.vehicle.model)
-        session.vehicle.model = nameplateData.model;
-      if (nameplateData.serial && !session.vehicle.serial) {
+      if (!session.vehicle.model)   session.vehicle.model   = nameplateData.model;
+      if (!session.vehicle.serial && nameplateData.serial) {
         session.vehicle.serial       = nameplateData.serial;
         session.vehicle.serialSource = 'NAMEPLATE';
       }
-      if (nameplateData.voltage     && !session.vehicle.voltage)   session.vehicle.voltage   = nameplateData.voltage;
-      if (nameplateData.capacity_kg && !session.vehicle.capacity)  session.vehicle.capacity  = nameplateData.capacity_kg;
-      if (nameplateData.year        && !session.vehicle.year)      session.vehicle.year      = nameplateData.year;
+      if (!session.vehicle.voltage  && nameplateData.voltage)     session.vehicle.voltage  = nameplateData.voltage;
+      if (!session.vehicle.capacity && nameplateData.capacity_kg) session.vehicle.capacity = nameplateData.capacity_kg;
+      if (!session.vehicle.year     && nameplateData.year)        session.vehicle.year     = nameplateData.year;
       if (!session.vehicle.type || session.vehicle.type === 'UNKNOWN')
         session.vehicle.type = nameplateData.vehicle_type ?? 'UNKNOWN';
     }
@@ -61,23 +60,21 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
 
     await updateSession(userId, session, env);
 
-    // 每张图独立回复（引用原图）
-    const icon = {
-      ok: '✓', low: '⚠', leak: '⚠', dirty: '⚠',
-      missing: '✗', unreadable: '—', 'n/a': 'N/A', noted: '✓',
-    }[result.status] ?? '•';
+    // DO /result — 更新进度卡片
+    const doId   = env.IMAGE_DEDUP.idFromName(userId);
+    const doStub = env.IMAGE_DEDUP.get(doId);
+    await doStub.fetch('http://do/result', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        check_id: result.check_id,
+        status:   result.status,
+        reading:  result.reading,
+        vehicle:  session.vehicle,
+      }),
+    });
 
-    const replyText = nameplateData?.model
-      ? `📋 ${nameplateData.model}${nameplateData.serial ? ' | S/N: ' + nameplateData.serial : ''}  (${nameplateData.vehicle_type ?? 'unknown type'})`
-      : `${icon} [${result.check_id}] ${result.reading ?? ''}`;
-
-    await replyToMessage(
-      messageId,
-      JSON.stringify({ text: replyText }),
-      'text',
-      env,
-    );
-
+    // 只有需要人工确认时才单独回复（序列号模糊等）
     if (nameplateData?.confirm_needed && nameplateData?.confirm_prompt) {
       await replyToMessage(
         messageId,
