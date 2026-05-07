@@ -41,6 +41,9 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       if (parts.length > 0) vehicleContext = parts.join('\n');
     }
 
+    // 错峰：随机延迟 0–1500ms，防止多张图同时触发 Claude rate limit
+    await new Promise(r => setTimeout(r, Math.random() * 1500));
+
     const result = await analyzeImageWithClaude(imageData, env, 25000, vehicleContext);
 
     // 铭牌处理
