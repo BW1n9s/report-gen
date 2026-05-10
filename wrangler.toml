@@ -33,5 +33,5 @@ new_sqlite_classes = ["ImageDedupDO"]
 [vars]
 LARK_API_URL             = "https://open.larksuite.com/open-apis"
 CLAUDE_MODEL             = "claude-sonnet-4-6"
-FORKLIFT_PDI_WIKI_TOKEN  = "PgszwtAOyiEOFbk0G9LlBM1cgrg"
-LOADER_PDI_WIKI_TOKEN    = "MQNXwJwkYiPb6Ek03U2lGeSggFe"
+FORKLIFT_PDI_DOC_TOKEN   = "ZkRddzfyAo4jPBx0KLUlv21Bg0e"
+LOADER_PDI_DOC_TOKEN     = "F7ZKd4tXnoLS4YxZBrLlLjPcgfb"

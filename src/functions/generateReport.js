@@ -1,6 +1,5 @@
 import { getTemplate } from '../templates/index.js';
 import {
-  getWikiNodeObjToken,
   copyDocumentToRoot,
   appendReportBlocks,
   getDocumentUrl,
@@ -122,11 +121,11 @@ export async function generateReportAsLarkDoc(session, env) {
 
   if (reportType !== 'PDI') return null;
 
-  const wikiToken = vehicleType === 'WHEEL_LOADER'
-    ? env.LOADER_PDI_WIKI_TOKEN
-    : env.FORKLIFT_PDI_WIKI_TOKEN;
+  const docToken = vehicleType === 'WHEEL_LOADER'
+    ? env.LOADER_PDI_DOC_TOKEN
+    : env.FORKLIFT_PDI_DOC_TOKEN;
 
-  if (!wikiToken) return null;
+  if (!docToken) return null;
 
   const now   = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
   const title = [
@@ -135,9 +134,7 @@ export async function generateReportAsLarkDoc(session, env) {
     `PDI ${now.split(',')[0]}`,
   ].filter(Boolean).join(' — ');
 
-  // wiki token → docx obj_token → 复制文档 → 写入报告
-  const objToken   = await getWikiNodeObjToken(wikiToken, env);
-  const newFile    = await copyDocumentToRoot(objToken, title, env);
+  const newFile    = await copyDocumentToRoot(docToken, title, env);
   const reportText = await generateReport(session, env);
   await appendReportBlocks(newFile.token, reportText, env);
 
