@@ -349,6 +349,47 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
   }
 
+  async function uploadImage(base64, mediaType) {
+    const boundary = '----LarkBoundary' + Date.now();
+    const binaryStr = atob(base64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+    const size = bytes.length;
+
+    const enc = new TextEncoder();
+    const parts = [];
+    const addField = (name, value) => {
+      parts.push(enc.encode(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
+      ));
+    };
+    addField('file_name', 'inspection.jpg');
+    addField('parent_type', 'docx_image');
+    addField('parent_node', documentId);
+    addField('size', String(size));
+    parts.push(enc.encode(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="inspection.jpg"\r\nContent-Type: ${mediaType}\r\n\r\n`
+    ));
+    parts.push(bytes);
+    parts.push(enc.encode(`\r\n--${boundary}--\r\n`));
+
+    const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
+    const body = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const part of parts) { body.set(part, offset); offset += part.length; }
+
+    const res  = await fetch(`${env.LARK_API_URL}/drive/v1/medias/upload_all`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body: body.buffer,
+    });
+    const text = await res.text();
+    console.log('[fillReport] uploadImage response:', text.slice(0, 200));
+    const data = JSON.parse(text);
+    if (data.code !== 0) throw new Error(`uploadImage failed: ${data.msg}`);
+    return data.data.file_token;
+  }
+
   const allBlocks    = await getAllBlocks();
   const blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
   const rootBlock    = allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0];
@@ -419,11 +460,13 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       await putBlock(section.notesBlockId, item.note);
     }
 
-    if (item.originalMsgId && section.insertBeforeBlockId) {
+    if (item.originalMsgId && item.imageKey) {
       try {
         const imageData   = await downloadImage(item.originalMsgId, item.imageKey, token, env);
-        const fileToken   = await uploadImageToLark(imageData.base64, imageData.mediaType, token, env);
-        const insertIndex = rootChildren.indexOf(section.insertBeforeBlockId);
+        const fileToken   = await uploadImage(imageData.base64, imageData.mediaType);
+        const insertIndex = section.insertBeforeBlockId
+          ? rootChildren.indexOf(section.insertBeforeBlockId)
+          : -1;
 
         const res  = await fetch(
           `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
