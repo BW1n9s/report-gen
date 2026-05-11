@@ -395,6 +395,15 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   const rootBlock    = allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0];
   const rootChildren = rootBlock?.children ?? [];
 
+  for (const [id, block] of Object.entries(blockMap)) {
+    if (block.block_type === 4 || block.block_type === 3) {
+      const content = block.heading2?.elements?.[0]?.text_run?.content
+        ?? block.heading3?.elements?.[0]?.text_run?.content
+        ?? '';
+      if (content) console.log('[fillReport] heading found:', block.block_type, content.slice(0, 60));
+    }
+  }
+
   // Build section mapping: checkId → { resultBlockId, notesBlockId, insertBeforeBlockId }
   const sectionMap   = {};
   let currentCheckId = null;
@@ -448,11 +457,15 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     // ── nameplate: insert into Basic Information section ──────────────────
     if (item.check_id === 'nameplate') {
       if (!item.originalMsgId || !item.imageKey) continue;
-      const basicHeadingIdx = rootChildren.findIndex(blockId => {
-        const b = blockMap[blockId];
-        return (b?.block_type === 3 || b?.block_type === 4) &&
-          getBlockText(b).includes('Basic Information');
-      });
+      const basicHeadingBlock = allBlocks.find(b =>
+        (b.block_type === 4 || b.block_type === 3) &&
+        (b.heading2?.elements?.[0]?.text_run?.content?.includes('Basic') ||
+         b.heading3?.elements?.[0]?.text_run?.content?.includes('Basic'))
+      );
+      console.log('[fillReport] basicHeadingBlock:', basicHeadingBlock?.block_id ?? 'not found');
+      const basicHeadingIdx = basicHeadingBlock
+        ? rootChildren.indexOf(basicHeadingBlock.block_id)
+        : -1;
       if (basicHeadingIdx === -1) { console.warn('[fillReport] Basic Information heading not found'); continue; }
       let dividerIdx = -1;
       for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
