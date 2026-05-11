@@ -480,13 +480,17 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         console.log('[fillReport] nameplate image downloaded, size:', imageData.base64.length);
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType);
         console.log('[fillReport] nameplate image uploaded, fileToken:', fileToken);
+        console.log('[fillReport] insertImage body:', JSON.stringify({
+          children: [{ block_type: 27, image: { token: fileToken, width: 800, height: 600 } }],
+          index: dividerIdx,
+        }));
         const res = await fetch(
           `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({
-              children: [{ block_type: 27, image: { token: fileToken } }],
+              children: [{ block_type: 27, image: { token: fileToken, width: 800, height: 600 } }],
               index: dividerIdx,
             }),
           },
@@ -537,13 +541,17 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           ? rootChildren.indexOf(section.insertBeforeBlockId)
           : -1;
 
+        console.log('[fillReport] insertImage body:', JSON.stringify({
+          children: [{ block_type: 27, image: { token: fileToken, width: 800, height: 600 } }],
+          index: insertIndex >= 0 ? insertIndex : -1,
+        }));
         const res  = await fetch(
           `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({
-              children: [{ block_type: 27, image: { token: fileToken } }],
+              children: [{ block_type: 27, image: { token: fileToken, width: 800, height: 600 } }],
               index: insertIndex >= 0 ? insertIndex : -1,
             }),
           },
