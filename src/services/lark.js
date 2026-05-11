@@ -313,7 +313,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         ? `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks?page_size=500&page_token=${pageToken}`
         : `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks?page_size=500`;
       const res  = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      const data = await res.json();
+      const text = await res.text();
+      console.log('[fillReport] getAllBlocks response:', text.slice(0, 200));
+      const data = JSON.parse(text);
       blocks.push(...(data.data?.items ?? []));
       pageToken = data.data?.has_more ? data.data.page_token : null;
     } while (pageToken);
@@ -335,8 +337,10 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         }),
       },
     );
-    const data = await res.json();
-    if (data.code !== 0) console.error(`[lark] putBlock ${blockId} failed:`, JSON.stringify(data));
+    const text = await res.text();
+    console.log('[fillReport] putBlock response:', text.slice(0, 200));
+    const data = JSON.parse(text);
+    if (data.code !== 0) console.error(`[lark] putBlock ${blockId} failed:`, text);
     return data;
   }
 
@@ -427,8 +431,10 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
             }),
           },
         );
-        const data = await res.json();
-        if (data.code !== 0) console.error('[lark] insert image block failed:', JSON.stringify(data));
+        const text = await res.text();
+        console.log('[fillReport] insertImage response:', text.slice(0, 200));
+        const data = JSON.parse(text);
+        if (data.code !== 0) console.error('[lark] insert image block failed:', text);
       } catch (e) {
         console.error('[lark] image insert failed:', e.message);
       }
