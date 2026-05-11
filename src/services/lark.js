@@ -455,7 +455,10 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
   // Process image items
   for (const item of items) {
-    console.log('[fillReport] item:', item.check_id, 'originalMsgId:', item.originalMsgId, 'imageKey:', item.imageKey);
+    console.log('[fillReport] item check_id:', item.check_id,
+      'has originalMsgId:', !!item.originalMsgId,
+      'has imageKey:', !!item.imageKey,
+      'entering image logic:', !!(item.originalMsgId && item.imageKey));
     if (item.type !== 'image') continue;
     if (!item.check_id || item.check_id === 'general') continue;
 
@@ -501,6 +504,19 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         console.log('[fillReport] nameplate image downloaded, size:', imageData.base64.length);
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
         console.log('[fillReport] image uploaded to block:', imageBlockId, 'fileToken:', fileToken);
+
+        // Step 3: update image block with file_token
+        console.log('[fillReport] updating image block with token:', fileToken);
+        const updateRes = await fetch(
+          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ update_image: { token: fileToken } }),
+          },
+        );
+        const updateText = await updateRes.text();
+        console.log('[fillReport] update image block response:', updateText.slice(0, 200));
         await refreshBlocks();
       } catch (e) {
         console.error('[fillReport] nameplate image insert failed:', e.message);
@@ -555,6 +571,19 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         console.log('[fillReport] image downloaded, size:', imageData.base64.length);
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
         console.log('[fillReport] image uploaded to block:', imageBlockId, 'fileToken:', fileToken);
+
+        // Step 3: update image block with file_token
+        console.log('[fillReport] updating image block with token:', fileToken);
+        const updateRes = await fetch(
+          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ update_image: { token: fileToken } }),
+          },
+        );
+        const updateText = await updateRes.text();
+        console.log('[fillReport] update image block response:', updateText.slice(0, 200));
         await refreshBlocks();
       } catch (e) {
         console.error('[lark] image insert failed:', e.message);
