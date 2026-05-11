@@ -330,7 +330,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     const res  = await fetch(
       `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${blockId}`,
       {
-        method: 'PUT',
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           update_text_elements: { elements: [{ text_run: { content } }] },
