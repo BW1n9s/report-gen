@@ -78,10 +78,11 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        check_id: result.check_id,
-        reading:  result.reading,
+        check_id:      result.check_id,
+        reading:       result.reading,
         imageKey,
-        msgId: null,
+        msgId:         null,
+        originalMsgId: messageId,
       }),
     });
     const { count, itemId } = await doRes.json();

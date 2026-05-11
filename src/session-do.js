@@ -47,15 +47,16 @@ export class ImageDedupDO {
 
       items.push({
         itemId,
-        type:      'image',
-        check_id:  payload.check_id,
-        reading:   payload.reading,
-        status:    'pending',
-        note:      null,
-        imageKey:  payload.imageKey,
-        msgId:     payload.msgId ?? null,
-        cardMsgId: payload.msgId ?? null,   // 向后兼容（card actions 还用这个查）
-        timestamp: new Date().toISOString(),
+        type:          'image',
+        check_id:      payload.check_id,
+        reading:       payload.reading,
+        status:        'pending',
+        note:          null,
+        imageKey:      payload.imageKey,
+        msgId:         payload.msgId ?? null,
+        cardMsgId:     payload.msgId ?? null,   // 向后兼容（card actions 还用这个查）
+        originalMsgId: payload.originalMsgId ?? null,
+        timestamp:     new Date().toISOString(),
       });
       await this.state.storage.put('items', items);
 

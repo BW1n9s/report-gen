@@ -1,7 +1,6 @@
 import { getTemplate } from '../templates/index.js';
 import {
   copyDocumentToRoot,
-  appendReportBlocks,
   getDocumentUrl,
 } from '../services/lark.js';
 
@@ -134,9 +133,23 @@ export async function generateReportAsLarkDoc(session, env) {
     `PDI ${now.split(',')[0]}`,
   ].filter(Boolean).join(' — ');
 
-  const newFile    = await copyDocumentToRoot(docToken, title, env);
-  const reportText = await generateReport(session, env);
-  await appendReportBlocks(newFile.token, reportText, env);
+  const newFile = await copyDocumentToRoot(docToken, title, env);
+
+  const { fillReportIntoDoc } = await import('../services/lark.js');
+
+  // 从 DO 读 items
+  let doItems = [];
+  if (env.IMAGE_DEDUP && session.user_id) {
+    try {
+      const id   = env.IMAGE_DEDUP.idFromName(session.user_id);
+      const stub = env.IMAGE_DEDUP.get(id);
+      const res  = await stub.fetch('http://do/get-items');
+      const data = await res.json();
+      if (Array.isArray(data.items)) doItems = data.items;
+    } catch (e) { console.warn('DO read failed:', e.message); }
+  }
+
+  await fillReportIntoDoc(newFile.token, doItems, session, env);
 
   return { url: getDocumentUrl(newFile.token), title };
 }
