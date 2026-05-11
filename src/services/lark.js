@@ -349,7 +349,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
   }
 
-  async function uploadImage(base64, mediaType) {
+  async function uploadImage(base64, mediaType, parentNode) {
     const boundary = '----LarkBoundary' + Date.now();
     const binaryStr = atob(base64);
     const bytes = new Uint8Array(binaryStr.length);
@@ -363,10 +363,10 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
       ));
     };
-    console.log('[uploadImage] parent_node:', documentId, 'parent_type: docx_image');
+    console.log('[uploadImage] parent_node:', parentNode, 'parent_type: docx_image');
     addField('file_name', 'inspection.jpg');
     addField('parent_type', 'docx_image');
-    addField('parent_node', documentId);
+    addField('parent_node', parentNode);
     addField('size', String(size));
     parts.push(enc.encode(
       `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="inspection.jpg"\r\nContent-Type: ${mediaType}\r\n\r\n`
@@ -481,35 +481,27 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       if (dividerIdx === -1) { console.warn('[fillReport] Basic Information divider not found'); continue; }
       console.log('[fillReport] attempting nameplate image upload, dividerIdx:', dividerIdx);
       try {
-        const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
-        console.log('[fillReport] nameplate image downloaded, size:', imageData.base64.length);
-        const fileToken = await uploadImage(imageData.base64, imageData.mediaType);
-        console.log('[fillReport] nameplate image uploaded, fileToken:', fileToken);
-        console.log('[fillReport] insertImage body:', JSON.stringify({
-          children: [{ block_type: 27, image: { file_token: fileToken } }],
-          index: dividerIdx,
-        }));
-        const res = await fetch(
+        // Step 1: create empty image block
+        const createRes = await fetch(
           `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({
-              children: [{ block_type: 27, image: { file_token: fileToken } }],
-              index: dividerIdx,
-            }),
+            body: JSON.stringify({ children: [{ block_type: 27, image: {} }], index: dividerIdx }),
           },
         );
-        const text = await res.text();
-        if (text.trim()) {
-          try {
-            const data = JSON.parse(text);
-            if (data.code !== 0) console.error('[fillReport] nameplate image insert error:', text.slice(0, 200));
-            else { console.log('[fillReport] nameplate image insert ok'); await refreshBlocks(); }
-          } catch (_) {
-            console.log('[fillReport] nameplate insert non-JSON:', text.slice(0, 100));
-          }
-        }
+        const createText = await createRes.text();
+        console.log('[fillReport] createImageBlock response:', createText.slice(0, 200));
+        const createData = JSON.parse(createText);
+        const imageBlockId = createData.data?.children?.[0]?.block_id;
+        if (!imageBlockId) throw new Error('Failed to create image block');
+
+        // Step 2: upload image with imageBlockId as parent_node
+        const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
+        console.log('[fillReport] nameplate image downloaded, size:', imageData.base64.length);
+        const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
+        console.log('[fillReport] image uploaded to block:', imageBlockId, 'fileToken:', fileToken);
+        await refreshBlocks();
       } catch (e) {
         console.error('[fillReport] nameplate image insert failed:', e.message);
       }
@@ -539,39 +531,31 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (item.originalMsgId && item.imageKey) {
       console.log('[fillReport] attempting image upload for:', item.check_id);
       try {
-        const imageData   = await downloadImage(item.originalMsgId, item.imageKey, token, env);
-        console.log('[fillReport] image downloaded, size:', imageData.base64.length);
-        const fileToken   = await uploadImage(imageData.base64, imageData.mediaType);
-        console.log('[fillReport] image uploaded, fileToken:', fileToken);
         const insertIndex = section.insertBeforeBlockId
           ? rootChildren.indexOf(section.insertBeforeBlockId)
           : -1;
 
-        console.log('[fillReport] insertImage body:', JSON.stringify({
-          children: [{ block_type: 27, image: { file_token: fileToken } }],
-          index: insertIndex >= 0 ? insertIndex : -1,
-        }));
-        const res  = await fetch(
+        // Step 1: create empty image block
+        const createRes = await fetch(
           `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({
-              children: [{ block_type: 27, image: { file_token: fileToken } }],
-              index: insertIndex >= 0 ? insertIndex : -1,
-            }),
+            body: JSON.stringify({ children: [{ block_type: 27, image: {} }], index: insertIndex }),
           },
         );
-        const text = await res.text();
-        if (text.trim()) {
-          try {
-            const data = JSON.parse(text);
-            if (data.code !== 0) console.error('[fillReport] API error:', text.slice(0, 200));
-            else await refreshBlocks();
-          } catch (_) {
-            console.log('[fillReport] non-JSON response:', text.slice(0, 100));
-          }
-        }
+        const createText = await createRes.text();
+        console.log('[fillReport] createImageBlock response:', createText.slice(0, 200));
+        const createData = JSON.parse(createText);
+        const imageBlockId = createData.data?.children?.[0]?.block_id;
+        if (!imageBlockId) throw new Error('Failed to create image block');
+
+        // Step 2: upload image with imageBlockId as parent_node
+        const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
+        console.log('[fillReport] image downloaded, size:', imageData.base64.length);
+        const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
+        console.log('[fillReport] image uploaded to block:', imageBlockId, 'fileToken:', fileToken);
+        await refreshBlocks();
       } catch (e) {
         console.error('[lark] image insert failed:', e.message);
       }
