@@ -443,7 +443,52 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   for (const item of items) {
     console.log('[fillReport] item:', item.check_id, 'originalMsgId:', item.originalMsgId, 'imageKey:', item.imageKey);
     if (item.type !== 'image') continue;
-    if (!item.check_id || ['nameplate', 'general'].includes(item.check_id)) continue;
+    if (!item.check_id || item.check_id === 'general') continue;
+
+    // ── nameplate: insert into Basic Information section ──────────────────
+    if (item.check_id === 'nameplate') {
+      if (!item.originalMsgId || !item.imageKey) continue;
+      const basicHeadingIdx = rootChildren.findIndex(blockId => {
+        const b = blockMap[blockId];
+        return (b?.block_type === 3 || b?.block_type === 4) &&
+          getBlockText(b).includes('Basic Information');
+      });
+      if (basicHeadingIdx === -1) { console.warn('[fillReport] Basic Information heading not found'); continue; }
+      let dividerIdx = -1;
+      for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
+        const b = blockMap[rootChildren[i]];
+        if (b?.block_type === 22) { dividerIdx = i; break; }
+        if (b?.block_type === 3 || b?.block_type === 4) break;
+      }
+      if (dividerIdx === -1) { console.warn('[fillReport] Basic Information divider not found'); continue; }
+      try {
+        const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
+        const fileToken = await uploadImage(imageData.base64, imageData.mediaType);
+        const res = await fetch(
+          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+              children: [{ block_type: 27, image: { token: fileToken } }],
+              index: dividerIdx,
+            }),
+          },
+        );
+        const text = await res.text();
+        if (text.trim()) {
+          try {
+            const data = JSON.parse(text);
+            if (data.code !== 0) console.error('[fillReport] nameplate image insert error:', text.slice(0, 200));
+          } catch (_) {
+            console.log('[fillReport] nameplate insert non-JSON:', text.slice(0, 100));
+          }
+        }
+      } catch (e) {
+        console.error('[fillReport] nameplate image insert failed:', e.message);
+      }
+      continue;
+    }
 
     const section = sectionMap[item.check_id];
     if (!section) continue;
