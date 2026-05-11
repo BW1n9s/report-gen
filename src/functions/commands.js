@@ -209,7 +209,7 @@ async function cmdEnd({ userId, chatId, env }) {
         await sendCard(chatId, {
           header: { title: '📄 Lark 文档已生成', style: 'green' },
           body: `**${docResult.title}**\n\n点击下方链接查看和编辑完整交付检查报告。`,
-          buttons: [{ label: '打开文档', action: docResult.url, type: 'primary' }],
+          buttons: [{ label: '打开文档', url: docResult.url, type: 'primary' }],
         }, env);
       }
     } catch (docErr) {

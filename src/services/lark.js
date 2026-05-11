@@ -92,7 +92,7 @@ export async function sendCard(chatId, { header, body, buttons = [] }, env) {
         tag: 'button',
         text: { tag: 'plain_text', content: btn.label },
         type: btn.type ?? 'default',
-        value: { action: btn.action },
+        ...(btn.url ? { url: btn.url } : { value: { action: btn.action } }),
       })),
     });
   }
@@ -209,7 +209,7 @@ export async function appendReportBlocks(documentId, reportText, env) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ children, index: 300 }),
+      body: JSON.stringify({ children, index: -1 }),
     },
   );
   const data = await res.json();
