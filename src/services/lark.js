@@ -364,7 +364,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       ));
     };
     addField('file_name', 'inspection.jpg');
-    addField('parent_type', 'docx_image');
+    addField('parent_type', 'doc_image');
     addField('parent_node', documentId);
     addField('size', String(size));
     parts.push(enc.encode(
@@ -516,8 +516,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
 
     const section = sectionMap[item.check_id];
-    if (!section) continue;
+    if (!section) { console.log('[fillReport] section not found for check_id:', item.check_id); continue; }
 
+    console.log('[fillReport] processing image for:', item.check_id);
     const icon = STATUS_ICON[item.status] ?? '—';
 
     if (section.resultBlockId) {
