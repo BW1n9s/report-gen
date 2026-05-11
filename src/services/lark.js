@@ -285,22 +285,6 @@ export async function uploadImageToLark(base64, mediaType, token, env) {
 }
 
 export async function fillReportIntoDoc(documentId, items, session, env) {
-  const CHECK_ID_TO_HEADING = {
-    attachment_accessories: 'Attachment',
-    visual_structure:       'Visual',
-    fluid_levels:           'Fluid Level',
-    engine_mechanical:      'Engine',
-    electrical_system:      'Electrical System',
-    hydraulic_system:       'Hydraulic System',
-    mast_fork_chain:        'Mast, Fork',
-    loader_arm_axle:        'Loader Axle',
-    steering_brake_dynamic: 'Steering, Brake',
-    tyre_wheel:             'Tyre',
-    safety_functions:       'Safety Function',
-    maintenance_work:       'Maintenance Work',
-    final_result:           'Final Test Result',
-  };
-
   const STATUS_ICON = { ok: '✓', ng: '✗ NG', corrected: '✓✏', pending: '—' };
 
   const token = await getToken(env);
@@ -409,50 +393,45 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
   }
 
-  // Build section mapping: checkId → { resultBlockId, notesBlockId, insertBeforeBlockId }
-  const sectionMap   = {};
-  let currentCheckId = null;
+  // Build section mapping: checkId → { resultBlockId, notesBlockId, dividerIdx }
+  const CHECK_ID_TO_KEYWORD = {
+    attachment_accessories: 'Attachment',
+    visual_structure:       'Visual',
+    fluid_levels:           'Fluid Level',
+    engine_mechanical:      'Engine',
+    electrical_system:      'Electrical System',
+    hydraulic_system:       'Hydraulic System',
+    mast_fork_chain:        'Mast, Fork',
+    loader_arm_axle:        'Loader Axle',
+    steering_brake_dynamic: 'Steering, Brake',
+    tyre_wheel:             'Tyre',
+    safety_functions:       'Safety Function',
+    maintenance_work:       'Maintenance Work',
+    final_result:           'Final Test Result',
+  };
 
-  for (const blockId of rootChildren) {
-    const block = blockMap[blockId];
-    if (!block) continue;
+  const sectionMap = {};
+  for (const [checkId, keyword] of Object.entries(CHECK_ID_TO_KEYWORD)) {
+    const headingBlock = allBlocks.find(b =>
+      (b.block_type === 4 || b.block_type === 3) &&
+      (b.heading2?.elements?.[0]?.text_run?.content?.includes(keyword) ||
+       b.heading3?.elements?.[0]?.text_run?.content?.includes(keyword))
+    );
+    if (!headingBlock) continue;
 
-    const bt   = block.block_type;
-    const text = getBlockText(block);
-
-    if (bt === 4 || bt === 5) { // heading2 or heading3
-      let found = null;
-      for (const [checkId, keyword] of Object.entries(CHECK_ID_TO_HEADING)) {
-        if (text.includes(keyword)) { found = checkId; break; }
-      }
-      if (bt === 4) {
-        currentCheckId = found;
-        if (found && !sectionMap[found]) {
-          sectionMap[found] = { resultBlockId: null, notesBlockId: null, insertBeforeBlockId: null };
-        }
-      } else if (found) {
-        currentCheckId = found;
-        if (!sectionMap[found]) {
-          sectionMap[found] = { resultBlockId: null, notesBlockId: null, insertBeforeBlockId: null };
-        }
-      }
-      continue;
+    const headingIdx = rootChildren.indexOf(headingBlock.block_id);
+    let resultBlockId = null, notesBlockId = null, dividerIdx = -1;
+    for (let i = headingIdx + 1; i < rootChildren.length; i++) {
+      const b = blockMap[rootChildren[i]];
+      if (!b) continue;
+      if (b.block_type === 4 || b.block_type === 3) break;
+      const content = b.text?.elements?.[0]?.text_run?.content ?? '';
+      if (!resultBlockId && content.includes('Result')) resultBlockId = b.block_id;
+      if (!notesBlockId && content.includes('Notes')) notesBlockId = b.block_id;
+      if (b.block_type === 22 && dividerIdx === -1) { dividerIdx = i; break; }
     }
-
-    if (!currentCheckId || !sectionMap[currentCheckId]) continue;
-    const section = sectionMap[currentCheckId];
-
-    if (bt === 2) {
-      if (!section.resultBlockId && text.includes('Result')) {
-        section.resultBlockId = blockId;
-      } else if (!section.notesBlockId && text.includes('Notes')) {
-        section.notesBlockId = blockId;
-      }
-    } else if (bt === 22 && !section.insertBeforeBlockId) {
-      section.insertBeforeBlockId = blockId;
-    }
+    sectionMap[checkId] = { resultBlockId, notesBlockId, dividerIdx };
   }
-
   console.log('[fillReport] sectionMap keys:', Object.keys(sectionMap));
 
   // Process image items
@@ -507,6 +486,17 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
         console.log('[fillReport] image uploaded to block:', imageBlockId, 'fileToken:', fileToken);
 
+        const updateRes = await fetch(
+          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ update_image: { file_token: fileToken } }),
+          },
+        );
+        const updateText = await updateRes.text();
+        console.log('[fillReport] update image block response:', updateText.slice(0, 300));
+
         await refreshBlocks();
       } catch (e) {
         console.error('[fillReport] nameplate image insert failed:', e.message);
@@ -538,9 +528,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (item.originalMsgId && item.imageKey) {
       console.log('[fillReport] attempting image upload for:', item.check_id);
       try {
-        const insertIndex = section.insertBeforeBlockId
-          ? rootChildren.indexOf(section.insertBeforeBlockId)
-          : -1;
+        const insertIndex = section.dividerIdx ?? -1;
 
         // Step 1: create empty image block
         const createRes = await fetch(
@@ -562,6 +550,17 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         console.log('[fillReport] image downloaded, size:', imageData.base64.length);
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
         console.log('[fillReport] image uploaded to block:', imageBlockId, 'fileToken:', fileToken);
+
+        const updateRes = await fetch(
+          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ update_image: { file_token: fileToken } }),
+          },
+        );
+        const updateText = await updateRes.text();
+        console.log('[fillReport] update image block response:', updateText.slice(0, 300));
 
         await refreshBlocks();
       } catch (e) {
