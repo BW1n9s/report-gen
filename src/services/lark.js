@@ -441,6 +441,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
   // Process image items
   for (const item of items) {
+    console.log('[fillReport] item:', item.check_id, 'originalMsgId:', item.originalMsgId, 'imageKey:', item.imageKey);
     if (item.type !== 'image') continue;
     if (!item.check_id || ['nameplate', 'general'].includes(item.check_id)) continue;
 
