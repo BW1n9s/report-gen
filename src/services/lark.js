@@ -199,8 +199,13 @@ export async function copyDocumentToRoot(docToken, title, env) {
       }),
     },
   );
-  const permData = await permRes.json();
-  if (permData.code !== 0) console.error('[lark] set permission failed:', JSON.stringify(permData));
+  const permText = await permRes.text();
+  try {
+    const permData = JSON.parse(permText);
+    if (permData.code !== 0) console.error('[lark] set permission failed:', permText);
+  } catch (_) {
+    console.log('[lark] set permission response:', permText);
+  }
 
   return data.data.file; // { token, url, name, ... }
 }
