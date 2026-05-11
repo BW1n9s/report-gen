@@ -192,24 +192,24 @@ export async function copyDocumentToRoot(docToken, title, env) {
 
 /**
  * Append plain-text report lines as paragraph blocks to a docx document.
- * Uses the Lark docx v1 batch_create blocks API.
  */
 export async function appendReportBlocks(documentId, reportText, env) {
   const token = await getToken(env);
   const lines = reportText.split('\n').filter(l => l.trim());
   const children = lines.map(line => ({
     block_type: 2, // paragraph
-    paragraph: {
-      elements: [{ type: 'text_run', text_run: { content: line } }],
+    text: {
+      elements: [{ text_run: { content: line } }],
+      style: {},
     },
   }));
 
   const res = await fetch(
-    `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children/batch_create`,
+    `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ children, index: -1 }),
+      body: JSON.stringify({ children, index: 300 }),
     },
   );
   const data = await res.json();
