@@ -151,7 +151,7 @@ export async function generateReportAsLarkDoc(session, env) {
     }
   }
 
-  console.log('[doc] step 4: calling fillReportIntoDoc');
+  console.log('[doc] calling fillReportIntoDoc with documentId:', newFile.token);
   const { fillReportIntoDoc } = await import('../services/lark.js');
   await fillReportIntoDoc(newFile.token, doItems, session, env);
   console.log('[doc] step 5: fill done');
