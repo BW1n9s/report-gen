@@ -390,10 +390,14 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     return data.data.file_token;
   }
 
-  const allBlocks    = await getAllBlocks();
-  const blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
-  const rootBlock    = allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0];
-  const rootChildren = rootBlock?.children ?? [];
+  let allBlocks    = await getAllBlocks();
+  const blockMap   = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
+  let rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
+
+  async function refreshBlocks() {
+    allBlocks    = await getAllBlocks();
+    rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
+  }
 
   for (const [id, block] of Object.entries(blockMap)) {
     if (block.block_type === 4 || block.block_type === 3) {
@@ -500,7 +504,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           try {
             const data = JSON.parse(text);
             if (data.code !== 0) console.error('[fillReport] nameplate image insert error:', text.slice(0, 200));
-            else console.log('[fillReport] nameplate image insert ok');
+            else { console.log('[fillReport] nameplate image insert ok'); await refreshBlocks(); }
           } catch (_) {
             console.log('[fillReport] nameplate insert non-JSON:', text.slice(0, 100));
           }
@@ -561,6 +565,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           try {
             const data = JSON.parse(text);
             if (data.code !== 0) console.error('[fillReport] API error:', text.slice(0, 200));
+            else await refreshBlocks();
           } catch (_) {
             console.log('[fillReport] non-JSON response:', text.slice(0, 100));
           }
