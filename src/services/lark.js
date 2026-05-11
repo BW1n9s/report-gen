@@ -481,7 +481,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType);
         console.log('[fillReport] nameplate image uploaded, fileToken:', fileToken);
         console.log('[fillReport] insertImage body:', JSON.stringify({
-          children: [{ block_type: 27, image: { token: fileToken, width: 800, height: 600 } }],
+          children: [{ block_type: 27, image: { file_token: fileToken } }],
           index: dividerIdx,
         }));
         const res = await fetch(
@@ -490,7 +490,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({
-              children: [{ block_type: 27, image: { token: fileToken, width: 800, height: 600 } }],
+              children: [{ block_type: 27, image: { file_token: fileToken } }],
               index: dividerIdx,
             }),
           },
@@ -542,7 +542,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           : -1;
 
         console.log('[fillReport] insertImage body:', JSON.stringify({
-          children: [{ block_type: 27, image: { token: fileToken, width: 800, height: 600 } }],
+          children: [{ block_type: 27, image: { file_token: fileToken } }],
           index: insertIndex >= 0 ? insertIndex : -1,
         }));
         const res  = await fetch(
@@ -551,7 +551,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({
-              children: [{ block_type: 27, image: { token: fileToken, width: 800, height: 600 } }],
+              children: [{ block_type: 27, image: { file_token: fileToken } }],
               index: insertIndex >= 0 ? insertIndex : -1,
             }),
           },
