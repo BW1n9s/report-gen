@@ -172,14 +172,44 @@ export async function routeMessage(event, env) {
 
 export async function routeCardAction(event, env) {
   try {
-    const e          = event.event ?? {};
-    const action     = e.action?.value?.action;
-    const chatId     = e.context?.open_chat_id;
-    const userId     = e.operator?.open_id;
-    const itemId     = e.action?.value?.itemId;
-    const formValues = e.action?.form_values ?? {};
+    const e = event.event ?? {};
 
-    if (!action || !userId || !chatId) return;
+    // ── Defensive value parsing ──────────────────────────────────────────────
+    // Lark may deliver action.value as a JSON string OR as a parsed object
+    // depending on card schema version / encryption path — handle both.
+    const rawValue = e.action?.value;
+    let parsedValue = {};
+    if (typeof rawValue === 'string') {
+      try {
+        parsedValue = JSON.parse(rawValue);
+      } catch (err) {
+        console.error('[routeCardAction] failed to parse action.value string:',
+          rawValue?.slice(0, 120), err.message);
+      }
+    } else if (rawValue !== null && typeof rawValue === 'object') {
+      parsedValue = rawValue ?? {};
+    }
+
+    // form_values may also arrive as a JSON string in some Lark versions
+    const rawFormValues = e.action?.form_values;
+    let formValues = {};
+    if (typeof rawFormValues === 'string') {
+      try { formValues = JSON.parse(rawFormValues); } catch { formValues = {}; }
+    } else if (rawFormValues !== null && typeof rawFormValues === 'object') {
+      formValues = rawFormValues ?? {};
+    }
+
+    const action = parsedValue?.action;
+    const chatId = e.context?.open_chat_id;
+    const userId = e.operator?.open_id;
+    const itemId = parsedValue?.itemId;
+
+    if (!action || !userId || !chatId) {
+      console.warn('[routeCardAction] missing required fields — action:', action,
+        'userId:', userId, 'chatId:', chatId,
+        '\nraw e.action:', JSON.stringify(e.action)?.slice(0, 300));
+      return;
+    }
 
     if (ITEM_CARD_ACTIONS.has(action)) {
       await handleItemCardAction({ action, itemId, formValues, userId, chatId, env });

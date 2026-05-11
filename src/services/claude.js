@@ -8,11 +8,13 @@ Output schema:
 {
   "check_id": "<section id from list below>",
   "reading": "<objective observation only, max 12 words, no judgement>",
-  "nameplate": null
+  "nameplate": null,
+  "picking_list": null
 }
 
 Section IDs — pick the single best match:
   nameplate              — data plate, serial number plate, rating plate
+  picking_list           — delivery picking list, packing slip, invoice or order document showing customer name, VIN/Engine No., model, invoice number
   attachment_accessories — keys, manuals, charger, forks, attachments
   visual_structure       — body panels, paint, frame, overhead guard, decals, wiring
   fluid_levels           — any fluid level, coolant, fuel, hydraulic oil, fluid leaks
@@ -41,13 +43,31 @@ Nameplate schema (when check_id="nameplate"):
     "vehicle_type": "FORKLIFT_ICE|FORKLIFT_ELECTRIC|FORKLIFT_WALKIE|WHEEL_LOADER|UNKNOWN",
     "confirm_needed": false,
     "confirm_prompt": null
+  },
+  "picking_list": null
+}
+
+Picking list schema (when check_id="picking_list"):
+{
+  "check_id": "picking_list",
+  "reading": "picking list detected",
+  "nameplate": null,
+  "picking_list": {
+    "customer": "company/customer name or null",
+    "invoice_number": "invoice or order number or null",
+    "vin": "VIN or Engine No. from the document, or null — extract EXACTLY as printed",
+    "model": "product model code from the document or null",
+    "invoice_date": "date string as printed or null",
+    "contact": "contact person name or null",
+    "djj_code": "DJJ product code if visible or null"
   }
 }
 
 Rules:
 - reading = objective observation only, never use ok/good/normal/bad/damaged
 - uncertain digits in serial: "3[6?]BE01543", confirm_needed=true
-- If ELECTRIC context: note engine/transmission items as not applicable in reading`;
+- If ELECTRIC context: note engine/transmission items as not applicable in reading
+- For picking_list: extract VIN/Engine No. character-for-character as it appears in the document`;
 
 export const PROMPT_CORRECTION = `User is correcting or annotating an inspection photo.
 Extract the correction into JSON only, no other text.
@@ -124,7 +144,7 @@ export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000, 
 
   const payload = {
     model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 300,
+    max_tokens: 400,
     system: PROMPT_IMAGE + contextNote,
     messages: [{ role: 'user', content: [
       { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },
@@ -137,7 +157,7 @@ export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000, 
     const clean = raw.replace(/```json|```/g, '').trim();
     return JSON.parse(clean);
   } catch {
-    return { check_id: 'general', status: 'unreadable', reading: 'parse error', nameplate: null };
+    return { check_id: 'general', status: 'unreadable', reading: 'parse error', nameplate: null, picking_list: null };
   }
 }
 

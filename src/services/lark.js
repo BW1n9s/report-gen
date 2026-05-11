@@ -60,9 +60,6 @@ export async function sendMessage(chatId, text, env) {
 }
 
 // ─── Interactive Card ─────────────────────────────────────────────────────────
-// sendCard({ header: { title, style }, body, buttons: [{ label, action, type }] })
-// style: blue | green | yellow | red | grey
-// button type: primary | default | danger
 
 const HEADER_COLORS = {
   blue: 'blue',
@@ -159,10 +156,6 @@ export async function replyCardToMessage(messageId, card, env) {
 
 // ─── Update Existing Message ──────────────────────────────────────────────────
 
-/**
- * Resolve a Wiki node token to the underlying docx obj_token.
- * Requires wiki:wiki:readonly permission.
- */
 export async function getWikiNodeObjToken(wikiToken, env) {
   const token = await getToken(env);
   const res = await fetch(`${env.LARK_API_URL}/wiki/v2/spaces/get_node?token=${wikiToken}`, {
@@ -173,11 +166,6 @@ export async function getWikiNodeObjToken(wikiToken, env) {
   return data.data.node.obj_token;
 }
 
-/**
- * Copy a docx template into the bot's root folder with a new title.
- * Requires drive:file permission and the template shared to the bot.
- * Returns { token, url, name } from the Lark Drive API response.
- */
 export async function copyDocumentToRoot(docToken, title, env) {
   const token = await getToken(env);
   const res = await fetch(`${env.LARK_API_URL}/drive/v1/files/${docToken}/copy`, {
@@ -210,9 +198,6 @@ export async function copyDocumentToRoot(docToken, title, env) {
   return data.data.file; // { token, url, name, ... }
 }
 
-/**
- * Append plain-text report lines as paragraph blocks to a docx document.
- */
 export async function appendReportBlocks(documentId, reportText, env) {
   const token = await getToken(env);
   const lines = reportText.split('\n').filter(l => l.trim());
@@ -284,10 +269,26 @@ export async function uploadImageToLark(base64, mediaType, token, env) {
   return data.data.file_token;
 }
 
+// ─── Fill Report Into Doc ─────────────────────────────────────────────────────
+
 export async function fillReportIntoDoc(documentId, items, session, env) {
   const STATUS_ICON = { ok: '✓', ng: '✗ NG', corrected: '✓✏', pending: '—' };
 
   const token = await getToken(env);
+
+  // ── Effective values with priority logic ─────────────────────────────────
+  const v  = session.vehicle    ?? {};
+  const pl = session.pickingList ?? {};
+
+  // VIN priority: manual user input > picking list > nameplate OCR
+  const { getEffectiveSerial } = await import('../functions/generateReport.js');
+  const effectiveSerial = getEffectiveSerial(session);
+
+  const serialSource = v.serialSource === 'MANUAL'  ? 'MANUAL'
+                     : pl.vin                        ? 'PICKING_LIST'
+                     : v.serial                      ? 'NAMEPLATE'
+                     : 'none';
+  console.log('[fillReport] effectiveSerial:', effectiveSerial, 'source:', serialSource);
 
   async function getAllBlocks() {
     const blocks = [];
@@ -326,9 +327,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (text.trim()) {
       try {
         const data = JSON.parse(text);
-        if (data.code !== 0) console.error('[fillReport] API error:', text.slice(0, 200));
+        if (data.code !== 0) console.error('[fillReport] putBlock error:', text.slice(0, 200));
       } catch (_) {
-        console.log('[fillReport] non-JSON response:', text.slice(0, 100));
+        console.log('[fillReport] putBlock non-JSON response:', text.slice(0, 100));
       }
     }
   }
@@ -375,6 +376,19 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     return data.data.file_token;
   }
 
+  async function replaceImageBlock(imageBlockId, fileToken) {
+    const updateRes = await fetch(
+      `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ replace_image: { token: fileToken } }),
+      },
+    );
+    const updateText = await updateRes.text();
+    console.log('[fillReport] replace_image response:', updateText.slice(0, 200));
+  }
+
   let allBlocks    = await getAllBlocks();
   const blockMap   = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
   let rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
@@ -384,16 +398,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
   }
 
-  for (const [id, block] of Object.entries(blockMap)) {
-    if (block.block_type === 4 || block.block_type === 3) {
-      const content = block.heading2?.elements?.[0]?.text_run?.content
-        ?? block.heading3?.elements?.[0]?.text_run?.content
-        ?? '';
-      if (content) console.log('[fillReport] heading found:', block.block_type, content.slice(0, 60));
-    }
-  }
+  // ── Build section map ─────────────────────────────────────────────────────
 
-  // Build section mapping: checkId → { resultBlockId, notesBlockId, dividerIdx }
   const CHECK_ID_TO_KEYWORD = {
     attachment_accessories: 'Attachment',
     visual_structure:       'Visual',
@@ -434,38 +440,40 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   }
   console.log('[fillReport] sectionMap keys:', Object.keys(sectionMap));
 
-  // Process image items
+  // ── Helper: find Basic Information section divider ────────────────────────
+
+  function findBasicSectionDividerIdx() {
+    const basicHeadingBlock = allBlocks.find(b =>
+      (b.block_type === 4 || b.block_type === 3) &&
+      (b.heading2?.elements?.[0]?.text_run?.content?.includes('Basic') ||
+       b.heading3?.elements?.[0]?.text_run?.content?.includes('Basic'))
+    );
+    if (!basicHeadingBlock) return -1;
+    const basicHeadingIdx = rootChildren.indexOf(basicHeadingBlock.block_id);
+    if (basicHeadingIdx === -1) return -1;
+    for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
+      const b = blockMap[rootChildren[i]];
+      if (b?.block_type === 22) return i;
+      if (b?.block_type === 3 || b?.block_type === 4) return -1;
+    }
+    return -1;
+  }
+
+  // ── Process image items ───────────────────────────────────────────────────
+
   for (const item of items) {
-    console.log('[fillReport] item check_id:', item.check_id,
-      'has originalMsgId:', !!item.originalMsgId,
-      'has imageKey:', !!item.imageKey,
-      'entering image logic:', !!(item.originalMsgId && item.imageKey));
     if (item.type !== 'image') continue;
     if (!item.check_id || item.check_id === 'general') continue;
 
-    // ── nameplate: insert into Basic Information section ──────────────────
-    if (item.check_id === 'nameplate') {
+    // ── Nameplate / picking_list: insert into Basic Information section ────
+    if (item.check_id === 'nameplate' || item.check_id === 'picking_list') {
       if (!item.originalMsgId || !item.imageKey) continue;
-      const basicHeadingBlock = allBlocks.find(b =>
-        (b.block_type === 4 || b.block_type === 3) &&
-        (b.heading2?.elements?.[0]?.text_run?.content?.includes('Basic') ||
-         b.heading3?.elements?.[0]?.text_run?.content?.includes('Basic'))
-      );
-      console.log('[fillReport] basicHeadingBlock:', basicHeadingBlock?.block_id ?? 'not found');
-      const basicHeadingIdx = basicHeadingBlock
-        ? rootChildren.indexOf(basicHeadingBlock.block_id)
-        : -1;
-      if (basicHeadingIdx === -1) { console.warn('[fillReport] Basic Information heading not found'); continue; }
-      let dividerIdx = -1;
-      for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
-        const b = blockMap[rootChildren[i]];
-        if (b?.block_type === 22) { dividerIdx = i; break; }
-        if (b?.block_type === 3 || b?.block_type === 4) break;
+      const dividerIdx = findBasicSectionDividerIdx();
+      if (dividerIdx === -1) {
+        console.warn('[fillReport] Basic Information divider not found for:', item.check_id);
+        continue;
       }
-      if (dividerIdx === -1) { console.warn('[fillReport] Basic Information divider not found'); continue; }
-      console.log('[fillReport] attempting nameplate image upload, dividerIdx:', dividerIdx);
       try {
-        // Step 1: create empty image block
         const createRes = await fetch(
           `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
           {
@@ -474,41 +482,25 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
             body: JSON.stringify({ children: [{ block_type: 27, image: {} }], index: dividerIdx }),
           },
         );
-        const createText = await createRes.text();
-        console.log('[fillReport] createImageBlock response:', createText.slice(0, 200));
-        const createData = JSON.parse(createText);
+        const createData = JSON.parse(await createRes.text());
         const imageBlockId = createData.data?.children?.[0]?.block_id;
         if (!imageBlockId) throw new Error('Failed to create image block');
 
-        // Step 2: upload image with imageBlockId as parent_node
         const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
-        console.log('[fillReport] nameplate image downloaded, size:', imageData.base64.length);
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
-        console.log('[fillReport] image uploaded to block:', imageBlockId, 'fileToken:', fileToken);
-
-        const updateRes = await fetch(
-          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
-          {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ replace_image: { token: fileToken } }),
-          },
-        );
-        const updateText = await updateRes.text();
-        console.log('[fillReport] replace_image response:', updateText.slice(0, 200));
-
+        console.log('[fillReport] image uploaded:', item.check_id, 'block:', imageBlockId, 'token:', fileToken);
+        await replaceImageBlock(imageBlockId, fileToken);
         await refreshBlocks();
       } catch (e) {
-        console.error('[fillReport] nameplate image insert failed:', e.message);
+        console.error(`[fillReport] ${item.check_id} image insert failed:`, e.message);
       }
       continue;
     }
 
+    // ── Regular section items ─────────────────────────────────────────────
     const section = sectionMap[item.check_id];
-    console.log('[fillReport] looking up check_id:', item.check_id, 'found:', !!section);
     if (!section) continue;
 
-    console.log('[fillReport] processing image for:', item.check_id);
     const icon = STATUS_ICON[item.status] ?? '—';
 
     if (section.resultBlockId) {
@@ -522,15 +514,10 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       await putBlock(section.notesBlockId, item.note);
     }
 
-    console.log('[fillReport] checking image for item:', item.check_id,
-      'has originalMsgId:', !!item.originalMsgId,
-      'has imageKey:', !!item.imageKey);
     if (item.originalMsgId && item.imageKey) {
-      console.log('[fillReport] attempting image upload for:', item.check_id);
       try {
         const insertIndex = section.dividerIdx ?? -1;
 
-        // Step 1: create empty image block
         const createRes = await fetch(
           `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
           {
@@ -539,29 +526,14 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
             body: JSON.stringify({ children: [{ block_type: 27, image: {} }], index: insertIndex }),
           },
         );
-        const createText = await createRes.text();
-        console.log('[fillReport] createImageBlock response:', createText.slice(0, 200));
-        const createData = JSON.parse(createText);
+        const createData = JSON.parse(await createRes.text());
         const imageBlockId = createData.data?.children?.[0]?.block_id;
         if (!imageBlockId) throw new Error('Failed to create image block');
 
-        // Step 2: upload image with imageBlockId as parent_node
         const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
-        console.log('[fillReport] image downloaded, size:', imageData.base64.length);
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
-        console.log('[fillReport] image uploaded to block:', imageBlockId, 'fileToken:', fileToken);
-
-        const updateRes = await fetch(
-          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
-          {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ replace_image: { token: fileToken } }),
-          },
-        );
-        const updateText = await updateRes.text();
-        console.log('[fillReport] replace_image response:', updateText.slice(0, 200));
-
+        console.log('[fillReport] image uploaded:', item.check_id, 'block:', imageBlockId, 'token:', fileToken);
+        await replaceImageBlock(imageBlockId, fileToken);
         await refreshBlocks();
       } catch (e) {
         console.error('[lark] image insert failed:', e.message);
@@ -569,9 +541,13 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
   }
 
-  // Fill basic_info fields
-  const v   = session.vehicle ?? {};
+  // ── Fill basic_info fields ────────────────────────────────────────────────
   const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
+
+  // VIN cross-check note (appended to serial field if there's a mismatch)
+  const vinMismatch = (pl.vin && v.serial && v.serialSource !== 'PICKING_LIST')
+    && pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
+  const serialNote = vinMismatch ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
 
   for (const blockId of rootChildren) {
     const block = blockMap[blockId];
@@ -580,12 +556,16 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
     if (text.includes('Machine Model')) {
       await putBlock(blockId, `Machine Model / 设备型号：${v.model ?? ''}`);
-    } else if (text.includes('Serial No.')) {
-      await putBlock(blockId, `Serial No. / VIN No. / 车架号：${v.serial ?? ''}`);
+    } else if (text.includes('Serial No.') || text.includes('VIN No.')) {
+      await putBlock(blockId, `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
     } else if (text.includes('Date / 日期')) {
       await putBlock(blockId, `Date / 日期：${now}`);
     } else if (text.includes('Hour Meter')) {
       await putBlock(blockId, `Hour Meter / 小时数：${v.hours ?? ''}`);
+    } else if (text.includes('Customer') || text.includes('客户')) {
+      await putBlock(blockId, `Customer / 客户：${pl.customer ?? ''}`);
+    } else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) {
+      await putBlock(blockId, `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
     }
   }
 }
@@ -614,8 +594,6 @@ export async function updateTextMessage(messageId, text, env) {
 
 /**
  * 发送单张图片的分析结果卡片（引用原图，带 OK/NG/Correction 按键）
- * status: 'pending' | 'ok' | 'ng' | 'corrected'
- * showInput: null | 'ng' | 'correction'
  */
 export async function sendItemCard({ messageId, chatId, count, label, reading,
   itemId, status = 'pending', note = null, showInput = null, env }) {

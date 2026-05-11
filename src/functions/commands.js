@@ -20,11 +20,11 @@ function normalizeReportType(raw) {
   return raw;
 }
 
-// 报告类型配置 — 未来可在此添加更多类型或用户自定义模板
+// 报告类型配置
 const REPORT_TYPES = {
   PDI: {
     label: 'Delivery Inspection (PDI)',
-    description: '新机交付检查 — 发送照片和文字记录检查结果，完成后生成报告',
+    description: '新机交付检查 — 发送照片和文字记录检查结果，完成后生成报告\n\n💡 如有提货单，请先发送提货单照片自动提取 VIN 和客户信息。',
   },
   SERVICE: {
     label: 'Service Record / 外出服务记录',
@@ -33,7 +33,12 @@ const REPORT_TYPES = {
 };
 
 export async function handleCommand({ text, userId, chatId, env }) {
-  const cmd = text.trim();
+  // Guard against undefined/null text (can happen if card action value wasn't parsed correctly)
+  const cmd = (text ?? '').trim();
+  if (!cmd) {
+    console.warn('[handleCommand] received empty text, userId:', userId);
+    return;
+  }
 
   // 中文菜单文字 → 统一映射到英文指令
   const normalized = {
@@ -154,9 +159,30 @@ async function cmdStatus({ userId, chatId, env }) {
     progressText = `\nChecklist coverage: ${coveredCount}/${checklist.length} items`;
   }
 
+  // Picking list summary
+  let pickingListText = '';
+  const pl = session.pickingList;
+  if (pl) {
+    const parts = [];
+    if (pl.customer)       parts.push(`Customer: ${pl.customer}`);
+    if (pl.invoiceNumber)  parts.push(`Invoice: ${pl.invoiceNumber}`);
+    if (pl.vin) {
+      const v = session.vehicle;
+      const vinStatus = (v?.serial && v.serialSource !== 'PICKING_LIST')
+        ? (v.serial.replace(/[\s\-]/g, '').toUpperCase() === pl.vin.replace(/[\s\-]/g, '').toUpperCase()
+            ? `✅ ${pl.vin}`
+            : `⚠️ PL: ${pl.vin}`)
+        : pl.vin;
+      parts.push(`VIN: ${vinStatus}`);
+    }
+    if (parts.length > 0) pickingListText = `\n📋 Picking List: ${parts.join(' | ')}`;
+  } else {
+    pickingListText = '\n💡 No picking list — send a photo to auto-fill customer/VIN';
+  }
+
   await sendCard(chatId, {
     header: { title: `📋 Active: ${typeLabel}`, style: 'yellow' },
-    body: `🔧 ${vehicleLabel}\n📷 ${images} photos　📝 ${texts} notes\nStarted: ${since}${progressText}\n\nContinue sending photos/notes, or tap End to generate report.`,
+    body: `🔧 ${vehicleLabel}\n📷 ${images} photos　📝 ${texts} notes\nStarted: ${since}${progressText}${pickingListText}\n\nContinue sending photos/notes, or tap End to generate report.`,
     buttons: [
       { label: 'Check Status', action: 'CHECKSTATUS', type: 'default' },
       { label: 'End', action: 'END', type: 'danger' },
@@ -164,7 +190,7 @@ async function cmdStatus({ userId, chatId, env }) {
   }, env);
 }
 
-// 中断当前 session，发送确认卡片防止误操作
+// 中断当前 session
 async function cmdAbort({ userId, chatId, env }) {
   const session = await getSession(userId, env);
 
@@ -280,7 +306,7 @@ export async function handleItemCardAction({ action, itemId, formValues, userId,
   }
 
   if (action === 'IMG_NG_SUBMIT') {
-    const note = formValues.ng_note ?? '';
+    const note = formValues?.ng_note ?? '';
     await patch({ status: 'ng', note });
     item.status = 'ng';
     item.note   = note;
@@ -289,7 +315,7 @@ export async function handleItemCardAction({ action, itemId, formValues, userId,
 
   if (action === 'IMG_CORRECT_SUBMIT') {
     const { analyzeCorrection } = await import('../services/claude.js');
-    const corrNote  = formValues.correction_note ?? '';
+    const corrNote  = formValues?.correction_note ?? '';
     const corrResult = await analyzeCorrection(corrNote, item.reading, env);
     const newReading = corrResult.reading ?? item.reading;
     const newNote    = corrResult.note ?? corrNote;

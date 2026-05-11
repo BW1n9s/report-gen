@@ -6,17 +6,20 @@ export async function getSession(userId, env) {
   if (raw) return JSON.parse(raw);
   return {
     user_id: userId,
-    report_type: null,       // 'PD' | 'SERVICE'
+    report_type: null,       // 'PDI' | 'SERVICE'
     status: 'collecting',
     // 车辆信息（从铭牌图片提取）
     vehicle: {
       type: null,            // 'FORKLIFT_ICE' | 'FORKLIFT_ELECTRIC' | 'FORKLIFT_WALKIE' | 'WHEEL_LOADER' | 'SKID_STEER' | 'UNKNOWN'
       model: null,
       serial: null,
+      serialSource: null,    // 'NAMEPLATE' | 'MANUAL' | 'PICKING_LIST'
       capacity: null,
       year: null,
       hours: null,
     },
+    // 提货单 / 领货单数据（从图片提取，用于交叉核对和填入报告）
+    pickingList: null,       // { customer, invoiceNumber, vin, model, invoiceDate, contact, djjCode }
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     items: [],

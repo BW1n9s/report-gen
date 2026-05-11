@@ -17,18 +17,60 @@ const SECTION_LABEL = {
   maintenance_work:        '保养工作',
   final_result:            '最终结果',
   nameplate:               '铭牌',
+  picking_list:            '提货单',
   general:                 '其他',
 };
 
+// ─── VIN cross-check ──────────────────────────────────────────────────────────
+
+/**
+ * Compare VIN from picking list against nameplate serial.
+ * Returns an array of result lines (empty = all good).
+ */
+function crossCheckVin(plVin, npSerial) {
+  if (!plVin || !npSerial) return [];
+  // Normalise: uppercase, strip spaces/dashes for comparison
+  const norm = (s) => s.replace(/[\s\-]/g, '').toUpperCase();
+  if (norm(plVin) === norm(npSerial)) {
+    return [`✅ VIN confirmed: ${plVin} matches picking list`];
+  }
+  return [
+    `⚠️ VIN MISMATCH — please verify:`,
+    `  Picking List: ${plVin}`,
+    `  Nameplate:    ${npSerial}`,
+  ];
+}
+
+/**
+ * Build a human-readable summary of what was extracted from a picking list.
+ */
+function buildPickingListSummary(pl, crossCheckLines = []) {
+  const lines = ['📋 Picking list detected:'];
+  if (pl.customer)        lines.push(`  Customer:  ${pl.customer}`);
+  if (pl.invoice_number)  lines.push(`  Invoice:   ${pl.invoice_number}`);
+  if (pl.invoice_date)    lines.push(`  Date:      ${pl.invoice_date}`);
+  if (pl.djj_code)        lines.push(`  DJJ Code:  ${pl.djj_code}`);
+  if (pl.model)           lines.push(`  Model:     ${pl.model}`);
+  if (pl.vin)             lines.push(`  VIN:       ${pl.vin}`);
+  if (pl.contact)         lines.push(`  Contact:   ${pl.contact}`);
+  if (crossCheckLines.length > 0) {
+    lines.push('');
+    lines.push(...crossCheckLines);
+  }
+  return lines.join('\n');
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
+
 export async function analyzeImage(imageKey, messageId, session, userId, env) {
   try {
-    // 重新读取最新 session，避免并发时用过期数据覆盖其他请求的写入
+    // Re-read latest session to avoid stale data from concurrent requests
     session = (await getSession(userId, env)) ?? session;
 
     const token     = await getToken(env);
     const imageData = await downloadImage(messageId, imageKey, token, env);
 
-    // 车辆上下文
+    // Vehicle context for Claude
     let vehicleContext = null;
     if (session.vehicle) {
       const parts = [];
@@ -42,12 +84,76 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       if (parts.length > 0) vehicleContext = parts.join('\n');
     }
 
-    // 错峰：随机延迟 0–1500ms，防止多张图同时触发 Claude rate limit
+    // Stagger concurrent requests to avoid Claude rate limits
     await new Promise(r => setTimeout(r, Math.random() * 1500));
 
     const result = await analyzeImageWithClaude(imageData, env, 25000, vehicleContext);
 
-    // 铭牌处理
+    // ── Picking list handling ────────────────────────────────────────────────
+    if (result.check_id === 'picking_list' && result.picking_list) {
+      const pl = result.picking_list;
+
+      // Merge into session.pickingList (first detection wins for each field)
+      if (!session.pickingList) session.pickingList = {};
+      const plStore = session.pickingList;
+      if (pl.customer       && !plStore.customer)       plStore.customer       = pl.customer;
+      if (pl.invoice_number && !plStore.invoiceNumber)  plStore.invoiceNumber  = pl.invoice_number;
+      if (pl.vin            && !plStore.vin)            plStore.vin            = pl.vin;
+      if (pl.model          && !plStore.model)          plStore.model          = pl.model;
+      if (pl.invoice_date   && !plStore.invoiceDate)    plStore.invoiceDate    = pl.invoice_date;
+      if (pl.contact        && !plStore.contact)        plStore.contact        = pl.contact;
+      if (pl.djj_code       && !plStore.djjCode)        plStore.djjCode        = pl.djj_code;
+
+      // If picking list has a VIN and we don't have a manually-entered serial,
+      // promote it as the pickingList source (lower priority than MANUAL)
+      if (pl.vin && session.vehicle && !session.vehicle.serial) {
+        session.vehicle.serial       = pl.vin;
+        session.vehicle.serialSource = 'PICKING_LIST';
+      }
+
+      await updateSession(userId, session, env);
+
+      // Cross-check against any nameplate already in session
+      const crossCheckLines = session.vehicle?.serial && session.vehicle.serialSource !== 'PICKING_LIST'
+        ? crossCheckVin(pl.vin, session.vehicle.serial)
+        : [];
+
+      const summaryText = buildPickingListSummary(pl, crossCheckLines);
+
+      // Store item in DO then send confirmation
+      const doId   = env.IMAGE_DEDUP.idFromName(userId);
+      const doStub = env.IMAGE_DEDUP.get(doId);
+      const doRes  = await doStub.fetch('http://do/result', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          check_id:      'picking_list',
+          reading:       `${pl.customer ?? ''} ${pl.vin ?? ''}`.trim() || 'picking list',
+          imageKey,
+          msgId:         null,
+          originalMsgId: messageId,
+        }),
+      });
+      const { itemId } = await doRes.json();
+
+      const txtResp = await replyToMessage(
+        messageId,
+        JSON.stringify({ text: summaryText }),
+        'text',
+        env,
+      );
+      const txtMsgId = txtResp?.data?.message_id ?? null;
+      if (txtMsgId) {
+        await doStub.fetch('http://do/item', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemId, msgId: txtMsgId }),
+        });
+      }
+      return;
+    }
+
+    // ── Nameplate handling ───────────────────────────────────────────────────
     const np = result.nameplate;
     if (np?.model) {
       if (!session.vehicle) session.vehicle = {};
@@ -66,13 +172,13 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
 
     // covered_checks
     const checkId = result.check_id;
-    if (checkId && !['nameplate', 'general'].includes(checkId)
+    if (checkId && !['nameplate', 'picking_list', 'general'].includes(checkId)
         && !session.covered_checks.includes(checkId)) {
       session.covered_checks.push(checkId);
       await updateSession(userId, session, env);
     }
 
-    // DO /result — 先存一条（msgId 待回填）
+    // Store item in DO
     const doId   = env.IMAGE_DEDUP.idFromName(userId);
     const doStub = env.IMAGE_DEDUP.get(doId);
     const doRes  = await doStub.fetch('http://do/result', {
@@ -95,8 +201,15 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
     });
 
     if (np?.model) {
-      // 铭牌：纯文本回复，回填 msgId 让 quote 也能找到 item
-      const txt     = `已分析 ${count} 张｜📋 ${np.model}${np.serial ? ' S/N: ' + np.serial : ''}`;
+      // Nameplate reply — include picking list cross-check if available
+      const crossCheckLines = session.pickingList?.vin
+        ? crossCheckVin(session.pickingList.vin, np.serial ?? session.vehicle?.serial ?? '')
+        : [];
+      const crossCheckSuffix = crossCheckLines.length > 0
+        ? '\n' + crossCheckLines.join('\n')
+        : '';
+
+      const txt     = `已分析 ${count} 张｜📋 ${np.model}${np.serial ? ' S/N: ' + np.serial : ''}${crossCheckSuffix}`;
       const txtResp = await replyToMessage(messageId, JSON.stringify({ text: txt }), 'text', env);
       const txtMsgId = txtResp?.data?.message_id ?? null;
       if (txtMsgId) await patchMsgId(txtMsgId);
@@ -104,7 +217,7 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
         await replyToMessage(messageId, JSON.stringify({ text: `⚠️ ${np.confirm_prompt}` }), 'text', env);
       }
     } else {
-      // 普通检查项：发交互卡片（引用原图），回填 msgId
+      // Regular check item — send interactive card
       const label    = SECTION_LABEL[result.check_id] ?? result.check_id;
       const cardResp = await sendItemCard({
         messageId,

@@ -30,18 +30,49 @@ function buildItemMap(items) {
   return map;
 }
 
+/**
+ * Determine the effective serial/VIN to use in the report.
+ * Priority: manual user input > picking list > nameplate OCR
+ */
+export function getEffectiveSerial(session) {
+  const v  = session.vehicle ?? {};
+  const pl = session.pickingList ?? {};
+
+  if (v.serialSource === 'MANUAL' && v.serial)  return v.serial;
+  if (pl.vin)                                    return pl.vin;
+  if (v.serial)                                  return v.serial;
+  return '';
+}
+
 // 生成纯文本报告
 export async function generateReport(session, env) {
   const now         = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
   const reportType  = normalizeReportType(session.report_type);
   const v           = session.vehicle ?? {};
+  const pl          = session.pickingList ?? {};
   const vehicleType = v.type ?? 'UNKNOWN';
+
+  const effectiveSerial = getEffectiveSerial(session);
 
   const vehicleLine = [
     v.model,
-    v.serial ? `S/N: ${v.serial}` : null,
-    v.hours  ? `${v.hours}h`       : null,
+    effectiveSerial ? `S/N: ${effectiveSerial}` : null,
+    v.hours ? `${v.hours}h` : null,
   ].filter(Boolean).join(' | ') || 'Vehicle not identified';
+
+  // Picking list header info
+  const plLines = [];
+  if (pl.customer)       plLines.push(`Customer:  ${pl.customer}`);
+  if (pl.invoiceNumber)  plLines.push(`Invoice:   ${pl.invoiceNumber}`);
+  if (pl.invoiceDate)    plLines.push(`Inv. Date: ${pl.invoiceDate}`);
+  if (pl.contact)        plLines.push(`Contact:   ${pl.contact}`);
+
+  // VIN cross-check note
+  const vinNote = (pl.vin && v.serial && v.serialSource !== 'PICKING_LIST')
+    ? (pl.vin.replace(/[\s\-]/g, '').toUpperCase() === v.serial.replace(/[\s\-]/g, '').toUpperCase()
+        ? `✅ VIN confirmed: ${pl.vin}`
+        : `⚠️  VIN MISMATCH — PL: ${pl.vin}  /  Nameplate: ${v.serial}`)
+    : null;
 
   const template = getTemplate(reportType, vehicleType);
 
@@ -63,7 +94,7 @@ export async function generateReport(session, env) {
 
   const itemMap  = buildItemMap(items);
   const issues   = [];
-  const SKIP_IDS = new Set(['nameplate', 'general']);
+  const SKIP_IDS = new Set(['nameplate', 'picking_list', 'general']);
 
   let body = '';
 
@@ -109,10 +140,15 @@ export async function generateReport(session, env) {
     for (const issue of issues) body += `⚠ ${issue}\n`;
   }
 
-  return `📋 ${template.title}\n🕐 ${now}\n🔧 ${vehicleLine}\n${'─'.repeat(44)}\n\n${body}`;
+  const plHeader = plLines.length > 0
+    ? plLines.join('\n') + '\n'
+    : '';
+  const vinLine = vinNote ? `${vinNote}\n` : '';
+
+  return `📋 ${template.title}\n🕐 ${now}\n🔧 ${vehicleLine}\n${plHeader}${vinLine}${'─'.repeat(44)}\n\n${body}`;
 }
 
-// Lark 文档生成（PDI 专用，复制 Wiki 模板 → 写入报告内容）
+// Lark 文档生成（PDI 专用，复制模板 → 写入报告内容）
 export async function generateReportAsLarkDoc(session, env) {
   const reportType  = normalizeReportType(session.report_type);
   const v           = session.vehicle ?? {};
@@ -127,9 +163,11 @@ export async function generateReportAsLarkDoc(session, env) {
   if (!docToken) return null;
 
   const now   = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
+  const effectiveSerial = getEffectiveSerial(session);
+
   const title = [
     v.model ?? 'Unknown',
-    v.serial ?? '',
+    effectiveSerial ?? '',
     `PDI ${now.split(',')[0]}`,
   ].filter(Boolean).join(' — ');
 
