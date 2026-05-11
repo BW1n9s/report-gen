@@ -461,9 +461,12 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         if (b?.block_type === 3 || b?.block_type === 4) break;
       }
       if (dividerIdx === -1) { console.warn('[fillReport] Basic Information divider not found'); continue; }
+      console.log('[fillReport] attempting nameplate image upload, dividerIdx:', dividerIdx);
       try {
         const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
+        console.log('[fillReport] nameplate image downloaded, size:', imageData.base64.length);
         const fileToken = await uploadImage(imageData.base64, imageData.mediaType);
+        console.log('[fillReport] nameplate image uploaded, fileToken:', fileToken);
         const res = await fetch(
           `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
           {
@@ -480,6 +483,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           try {
             const data = JSON.parse(text);
             if (data.code !== 0) console.error('[fillReport] nameplate image insert error:', text.slice(0, 200));
+            else console.log('[fillReport] nameplate image insert ok');
           } catch (_) {
             console.log('[fillReport] nameplate insert non-JSON:', text.slice(0, 100));
           }
@@ -506,10 +510,16 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       await putBlock(section.notesBlockId, item.note);
     }
 
+    console.log('[fillReport] checking image for item:', item.check_id,
+      'has originalMsgId:', !!item.originalMsgId,
+      'has imageKey:', !!item.imageKey);
     if (item.originalMsgId && item.imageKey) {
+      console.log('[fillReport] attempting image upload for:', item.check_id);
       try {
         const imageData   = await downloadImage(item.originalMsgId, item.imageKey, token, env);
+        console.log('[fillReport] image downloaded, size:', imageData.base64.length);
         const fileToken   = await uploadImage(imageData.base64, imageData.mediaType);
+        console.log('[fillReport] image uploaded, fileToken:', fileToken);
         const insertIndex = section.insertBeforeBlockId
           ? rootChildren.indexOf(section.insertBeforeBlockId)
           : -1;
