@@ -1,6 +1,6 @@
 import { getToken, downloadImage, replyToMessage, sendItemCard } from '../services/lark.js';
 import { analyzeImageWithClaude } from '../services/claude.js';
-import { updateSession } from '../services/session.js';
+import { getSession, updateSession } from '../services/session.js';
 
 const SECTION_LABEL = {
   attachment_accessories:  '附件配件',
@@ -22,7 +22,8 @@ const SECTION_LABEL = {
 
 export async function analyzeImage(imageKey, messageId, session, userId, env) {
   try {
-    await updateSession(userId, session, env);
+    // 重新读取最新 session，避免并发时用过期数据覆盖其他请求的写入
+    session = (await getSession(userId, env)) ?? session;
 
     const token     = await getToken(env);
     const imageData = await downloadImage(messageId, imageKey, token, env);

@@ -363,8 +363,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
       ));
     };
+    console.log('[fillReport] uploadImage parentNode:', documentId);
     addField('file_name', 'inspection.jpg');
-    addField('parent_type', 'doc_image');
+    addField('parent_type', 'docx_image');
     addField('parent_node', documentId);
     addField('size', String(size));
     parts.push(enc.encode(
