@@ -491,11 +491,11 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ update_image: { file_token: fileToken } }),
+            body: JSON.stringify({ replace_image: { token: fileToken } }),
           },
         );
         const updateText = await updateRes.text();
-        console.log('[fillReport] update image block response:', updateText.slice(0, 300));
+        console.log('[fillReport] replace_image response:', updateText.slice(0, 200));
 
         await refreshBlocks();
       } catch (e) {
@@ -556,11 +556,11 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ update_image: { file_token: fileToken } }),
+            body: JSON.stringify({ replace_image: { token: fileToken } }),
           },
         );
         const updateText = await updateRes.text();
-        console.log('[fillReport] update image block response:', updateText.slice(0, 300));
+        console.log('[fillReport] replace_image response:', updateText.slice(0, 200));
 
         await refreshBlocks();
       } catch (e) {
