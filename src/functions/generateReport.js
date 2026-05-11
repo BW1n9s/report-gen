@@ -133,11 +133,10 @@ export async function generateReportAsLarkDoc(session, env) {
     `PDI ${now.split(',')[0]}`,
   ].filter(Boolean).join(' — ');
 
+  console.log('[doc] step 1: copying document, docToken=', docToken);
   const newFile = await copyDocumentToRoot(docToken, title, env);
+  console.log('[doc] step 2: copy done, newFile=', JSON.stringify(newFile));
 
-  const { fillReportIntoDoc } = await import('../services/lark.js');
-
-  // 从 DO 读 items
   let doItems = [];
   if (env.IMAGE_DEDUP && session.user_id) {
     try {
@@ -146,10 +145,16 @@ export async function generateReportAsLarkDoc(session, env) {
       const res  = await stub.fetch('http://do/get-items');
       const data = await res.json();
       if (Array.isArray(data.items)) doItems = data.items;
-    } catch (e) { console.warn('DO read failed:', e.message); }
+      console.log('[doc] step 3: DO items count=', doItems.length);
+    } catch (e) {
+      console.warn('[doc] DO read failed:', e.message);
+    }
   }
 
+  console.log('[doc] step 4: calling fillReportIntoDoc');
+  const { fillReportIntoDoc } = await import('../services/lark.js');
   await fillReportIntoDoc(newFile.token, doItems, session, env);
+  console.log('[doc] step 5: fill done');
 
   return { url: getDocumentUrl(newFile.token), title };
 }
