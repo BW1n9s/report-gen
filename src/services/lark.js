@@ -183,10 +183,25 @@ export async function copyDocumentToRoot(docToken, title, env) {
   const res = await fetch(`${env.LARK_API_URL}/drive/v1/files/${docToken}/copy`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name: title, type: 'docx', folder_token: env.PDI_REPORT_FOLDER_TOKEN ?? '' }),
+    body: JSON.stringify({ name: title, type: 'docx', folder_token: '' }),
   });
   const data = await res.json();
   if (data.code !== 0) throw new Error(`copyDocumentToRoot failed (${data.code}): ${data.msg}`);
+
+  const permRes = await fetch(
+    `${env.LARK_API_URL}/drive/v1/permissions/${data.data.file.token}/public?type=docx`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        link_share_entity: 'tenant_editable',
+        copy_entity:       'tenant_editable',
+      }),
+    },
+  );
+  const permData = await permRes.json();
+  if (permData.code !== 0) console.error('[lark] set permission failed:', JSON.stringify(permData));
+
   return data.data.file; // { token, url, name, ... }
 }
 
