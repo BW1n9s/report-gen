@@ -315,6 +315,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       const res  = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
       const text = await res.text();
       console.log('[fillReport] getAllBlocks response:', text.slice(0, 200));
+      if (!text.trim()) break;
       const data = JSON.parse(text);
       blocks.push(...(data.data?.items ?? []));
       pageToken = data.data?.has_more ? data.data.page_token : null;
@@ -338,10 +339,14 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       },
     );
     const text = await res.text();
-    console.log('[fillReport] putBlock response:', text.slice(0, 200));
-    const data = JSON.parse(text);
-    if (data.code !== 0) console.error(`[lark] putBlock ${blockId} failed:`, text);
-    return data;
+    if (text.trim()) {
+      try {
+        const data = JSON.parse(text);
+        if (data.code !== 0) console.error('[fillReport] API error:', text.slice(0, 200));
+      } catch (_) {
+        console.log('[fillReport] non-JSON response:', text.slice(0, 100));
+      }
+    }
   }
 
   const allBlocks    = await getAllBlocks();
@@ -432,9 +437,14 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           },
         );
         const text = await res.text();
-        console.log('[fillReport] insertImage response:', text.slice(0, 200));
-        const data = JSON.parse(text);
-        if (data.code !== 0) console.error('[lark] insert image block failed:', text);
+        if (text.trim()) {
+          try {
+            const data = JSON.parse(text);
+            if (data.code !== 0) console.error('[fillReport] API error:', text.slice(0, 200));
+          } catch (_) {
+            console.log('[fillReport] non-JSON response:', text.slice(0, 100));
+          }
+        }
       } catch (e) {
         console.error('[lark] image insert failed:', e.message);
       }
