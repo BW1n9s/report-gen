@@ -183,7 +183,7 @@ export async function copyDocumentToRoot(docToken, title, env) {
   const res = await fetch(`${env.LARK_API_URL}/drive/v1/files/${docToken}/copy`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name: title, type: 'docx', folder_token: '' }),
+    body: JSON.stringify({ name: title, type: 'docx', folder_token: env.PDI_REPORT_FOLDER_TOKEN ?? '' }),
   });
   const data = await res.json();
   if (data.code !== 0) throw new Error(`copyDocumentToRoot failed (${data.code}): ${data.msg}`);
