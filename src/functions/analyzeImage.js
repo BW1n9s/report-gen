@@ -1,6 +1,8 @@
 import { getToken, downloadImage, replyToMessage, sendItemCard } from '../services/lark.js';
 import { analyzeImageWithClaude } from '../services/claude.js';
 import { getSession, updateSession } from '../services/session.js';
+import { template as forkliftPdiTemplate } from '../templates/pd_forklift.js';
+import { template as loaderPdiTemplate } from '../templates/pd_loader.js';
 
 const SECTION_LABEL = {
   attachment_accessories:  '附件配件',
@@ -20,6 +22,31 @@ const SECTION_LABEL = {
   picking_list:            '提货单',
   general:                 '其他',
 };
+
+// ─── Handwritten PDI item catalog ─────────────────────────────────────────────
+
+// Deduplicated union of all sub-items from both PDI templates (forklift + loader)
+const HANDWRITTEN_ITEM_CATALOG = (() => {
+  const seen = new Set();
+  const catalog = [];
+  for (const tmpl of [forkliftPdiTemplate, loaderPdiTemplate]) {
+    for (const section of tmpl.sections) {
+      if (!Array.isArray(section.items)) continue;
+      for (const item of section.items) {
+        if (!seen.has(item.id)) {
+          seen.add(item.id);
+          catalog.push({ id: item.id, label: item.label, section: section.id });
+        }
+      }
+    }
+  }
+  return catalog;
+})();
+
+// Map: sub-item ID → parent section ID
+const ITEM_SECTION_MAP = Object.fromEntries(
+  HANDWRITTEN_ITEM_CATALOG.map(i => [i.id, i.section]),
+);
 
 // ─── VIN cross-check ──────────────────────────────────────────────────────────
 
@@ -58,6 +85,118 @@ function buildPickingListSummary(pl, crossCheckLines = []) {
   return lines.join('\n');
 }
 
+// ─── Handwritten PDI handler ──────────────────────────────────────────────────
+
+async function handleHandwrittenPdi(imageKey, messageId, imageData, session, userId, env) {
+  const { analyzeHandwrittenPdiItems } = await import('../services/claude.js');
+
+  let result;
+  try {
+    result = await analyzeHandwrittenPdiItems(imageData, HANDWRITTEN_ITEM_CATALOG, env);
+  } catch (e) {
+    console.error('[handwrittenPdi] analyzeHandwrittenPdiItems failed:', e.message);
+    await replyToMessage(messageId, JSON.stringify({
+      text: `❌ 手写表格识别失败：${e.message}`,
+    }), 'text', env);
+    return;
+  }
+
+  if (!result.is_pdi_form || !Array.isArray(result.items) || result.items.length === 0) {
+    await replyToMessage(messageId, JSON.stringify({
+      text: '⚠️ 未能识别 PDI 表格内容，请确保照片清晰且完整包含检查表。',
+    }), 'text', env);
+    return;
+  }
+
+  // Filter to only items whose item_id exists in the catalog
+  const validItems = result.items.filter(i => i.item_id && ITEM_SECTION_MAP[i.item_id]);
+  if (validItems.length === 0) {
+    await replyToMessage(messageId, JSON.stringify({
+      text: '⚠️ 未能将表格项目匹配到 PDI 模版，请重试或手动输入。',
+    }), 'text', env);
+    return;
+  }
+
+  // Group detected sub-items by their parent section
+  const sectionGroups = {};
+  for (const item of validItems) {
+    const sectionId = ITEM_SECTION_MAP[item.item_id];
+    if (!sectionGroups[sectionId]) sectionGroups[sectionId] = [];
+    sectionGroups[sectionId].push(item);
+  }
+
+  // For each section: determine overall status (ng > na > ok) and build reading text
+  const STATUS_RANK = { ng: 3, na: 2, ok: 1 };
+  const doItems = [];
+
+  for (const [sectionId, sItems] of Object.entries(sectionGroups)) {
+    let topStatus = 'ok';
+    for (const si of sItems) {
+      if ((STATUS_RANK[si.status] ?? 0) > (STATUS_RANK[topStatus] ?? 0)) {
+        topStatus = si.status;
+      }
+    }
+    const storedStatus = topStatus === 'na' ? 'n/a' : topStatus;
+
+    const readingParts = sItems.map(si => {
+      const entry = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === si.item_id);
+      const shortLabel = (entry?.label ?? si.item_id).split('/')[0].trim();
+      const icon = si.status === 'ok' ? '✓' : si.status === 'ng' ? '✗' : 'N/A';
+      return si.reading ? `${shortLabel}: ${icon} (${si.reading})` : `${shortLabel}: ${icon}`;
+    });
+
+    doItems.push({
+      check_id:      sectionId,
+      reading:       readingParts.join(' | '),
+      status:        storedStatus,
+      imageKey,
+      originalMsgId: messageId,
+    });
+  }
+
+  // Bulk-store all section items in DO
+  const doId   = env.IMAGE_DEDUP.idFromName(userId);
+  const doStub = env.IMAGE_DEDUP.get(doId);
+  await doStub.fetch('http://do/results-bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: doItems }),
+  });
+
+  // Update covered_checks in session for newly covered sections
+  const newSections = Object.keys(sectionGroups).filter(
+    id => !session.covered_checks.includes(id),
+  );
+  if (newSections.length > 0) {
+    session.covered_checks.push(...newSections);
+    await updateSession(userId, session, env);
+  }
+
+  // Build summary reply
+  const total = validItems.length;
+  const okCnt = validItems.filter(i => i.status === 'ok').length;
+  const ngCnt = validItems.filter(i => i.status === 'ng').length;
+  const naCnt = validItems.filter(i => i.status === 'na').length;
+
+  let summary = `📋 手写 PDI 表格识别完成\n`;
+  summary += `共识别 ${total} 项，涉及 ${doItems.length} 个板块\n`;
+  summary += `✓ OK: ${okCnt}　✗ NG: ${ngCnt}　N/A: ${naCnt}`;
+
+  const ngItems = validItems.filter(i => i.status === 'ng');
+  if (ngItems.length > 0) {
+    summary += '\n\n⚠️ NG 项目：';
+    for (const item of ngItems) {
+      const entry = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === item.item_id);
+      const label = entry?.label ?? item.item_id;
+      summary += `\n  • ${label}${item.reading ? ': ' + item.reading : ''}`;
+    }
+  }
+
+  summary += '\n\n记录已保存。如需修改，请继续发送照片或文字。';
+
+  await replyToMessage(messageId, JSON.stringify({ text: summary }), 'text', env);
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export async function analyzeImage(imageKey, messageId, session, userId, env) {
@@ -86,6 +225,12 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
     await new Promise(r => setTimeout(r, Math.random() * 1500));
 
     const result = await analyzeImageWithClaude(imageData, env, 25000, vehicleContext);
+
+    // ── Handwritten PDI form ─────────────────────────────────────────────────
+    if (result.check_id === 'handwritten_pdi') {
+      await handleHandwrittenPdi(imageKey, messageId, imageData, session, userId, env);
+      return;
+    }
 
     // ── Picking list handling ────────────────────────────────────────────────
     if (result.check_id === 'picking_list' && result.picking_list) {

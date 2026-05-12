@@ -15,6 +15,7 @@ Output schema:
 Section IDs — pick the single best match:
   nameplate              — data plate, serial number plate, rating plate
   picking_list           — delivery picking list, packing slip, invoice or order document showing customer name, VIN/Engine No., model, invoice number
+  handwritten_pdi        — handwritten or printed PDI / inspection checklist form with multiple rows of check items and marks (ticks, crosses, NA)
   attachment_accessories — keys, manuals, charger, forks, attachments
   visual_structure       — body panels, paint, frame, overhead guard, decals, wiring
   fluid_levels           — any fluid level, coolant, fuel, hydraulic oil, fluid leaks
@@ -204,5 +205,63 @@ export async function analyzeTextWithClaude(text, env, timeoutMs = 15000) {
     return JSON.parse(clean);
   } catch {
     return { check_id: 'general', status: 'noted', reading: text.slice(0, 80), raw: text };
+  }
+}
+
+// ─── Handwritten PDI Extraction ───────────────────────────────────────────────
+
+/**
+ * itemCatalog: [{ id, label, section }] — full list from both PDI templates
+ * Returns: { is_pdi_form: bool, items: [{ item_id, status: "ok|ng|na", reading }] }
+ */
+export async function analyzeHandwrittenPdiItems(imageData, itemCatalog, env) {
+  const catalogText = itemCatalog
+    .map(i => `  ${i.id}: ${i.label}`)
+    .join('\n');
+
+  const system = `You are a PDI inspection form reader. The photo shows a HANDWRITTEN or PRINTED Pre-Delivery Inspection (PDI) checklist.
+
+Your task: identify every check item in the form that has been MARKED, and return its status.
+
+Mark interpretation:
+- ✓ √ tick checkmark = "ok"
+- ✗ × X cross = "ng"
+- \\ or NA or N/A or / (forward slash used as N/A) = "na"
+- blank / empty / dash = do NOT include (skip unchecked items)
+
+Return ONLY valid JSON, no other text:
+{
+  "is_pdi_form": true,
+  "items": [
+    { "item_id": "<id from catalog below>", "status": "ok|ng|na", "reading": "<handwritten note beside the mark, max 10 words, or null>" }
+  ]
+}
+
+If this is NOT a PDI/inspection checklist form: { "is_pdi_form": false, "items": [] }
+
+Rules:
+- Only include items you can CLEARLY see as marked — never guess
+- Match each row to the catalog by its English or Chinese label text visible in the form
+- If a row label does not match any catalog entry, omit it
+- "reading" = any handwritten annotation next to the mark (e.g. "replace", "low", "2500 hrs"), or null
+
+Item catalog (item_id: English label / 中文标签):
+${catalogText}`;
+
+  const payload = {
+    model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
+    max_tokens: 2000,
+    system,
+    messages: [{ role: 'user', content: [
+      { type: 'image', source: { type: 'base64', media_type: imageData.mediaType || 'image/jpeg', data: imageData.base64 } },
+      { type: 'text', text: 'Extract all marked items from this PDI form.' },
+    ]}],
+  };
+
+  const raw = await callClaude(payload, env, 45000);
+  try {
+    return JSON.parse(raw.replace(/```json|```/g, '').trim());
+  } catch {
+    return { is_pdi_form: false, items: [] };
   }
 }

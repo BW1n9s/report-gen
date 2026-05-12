@@ -67,6 +67,38 @@ export class ImageDedupDO {
       return Response.json({ count: items.length, itemId });
     }
 
+    // POST /results-bulk — bulk insert handwritten-PDI items (no msgId/dedup)
+    // body: { items: [{ check_id, reading, status, imageKey, originalMsgId }] }
+    // response: { count, addedCount }
+    if (request.method === 'POST' && url.pathname === '/results-bulk') {
+      const { items: newItems } = await request.json();
+      if (!Array.isArray(newItems) || newItems.length === 0) {
+        return Response.json({ count: 0, addedCount: 0 });
+      }
+      const items = (await this.state.storage.get('items')) ?? [];
+      const now   = new Date().toISOString();
+      let added   = 0;
+      for (const payload of newItems) {
+        const itemId = `item_${Date.now()}_${items.length}_${added}`;
+        items.push({
+          itemId,
+          type:          'handwritten',
+          check_id:      payload.check_id,
+          reading:       payload.reading  ?? '',
+          status:        payload.status   ?? 'ok',
+          note:          payload.note     ?? null,
+          imageKey:      payload.imageKey ?? null,
+          msgId:         null,
+          cardMsgId:     null,
+          originalMsgId: payload.originalMsgId ?? null,
+          timestamp:     now,
+        });
+        added++;
+      }
+      await this.state.storage.put('items', items);
+      return Response.json({ count: items.length, addedCount: added });
+    }
+
     // PATCH /item — 更新 item（OK/NG/Correction/msgId 回填）
     // body: { itemId, status?, reading?, note?, msgId?, cardMsgId? }
     if (request.method === 'PATCH' && url.pathname === '/item') {
