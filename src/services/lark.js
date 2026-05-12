@@ -1,6 +1,5 @@
 // ─── Token ────────────────────────────────────────────────────────────────────
 
-// Module-level token cache（热实例复用，冷启动重新拿）
 let _cachedToken = null;
 let _tokenExpiresAt = 0;
 
@@ -19,7 +18,7 @@ export async function getToken(env) {
   const data = await res.json();
   if (data.code !== 0) throw new Error(`getToken failed: ${data.msg}`);
   _cachedToken    = data.tenant_access_token;
-  _tokenExpiresAt = Date.now() + 6900 * 1000; // 6900s（token有效期7200s，留5分钟缓冲）
+  _tokenExpiresAt = Date.now() + 6900 * 1000;
   return _cachedToken;
 }
 
@@ -62,26 +61,17 @@ export async function sendMessage(chatId, text, env) {
 // ─── Interactive Card ─────────────────────────────────────────────────────────
 
 const HEADER_COLORS = {
-  blue: 'blue',
-  green: 'green',
-  yellow: 'yellow',
-  red: 'red',
-  grey: 'grey',
-  gray: 'grey',
+  blue: 'blue', green: 'green', yellow: 'yellow',
+  red: 'red', grey: 'grey', gray: 'grey',
 };
 
 export async function sendCard(chatId, { header, body, buttons = [] }, env) {
   const token = await getToken(env);
 
   const elements = [];
-
   if (body) {
-    elements.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: body },
-    });
+    elements.push({ tag: 'div', text: { tag: 'lark_md', content: body } });
   }
-
   if (buttons.length > 0) {
     elements.push({
       tag: 'action',
@@ -97,7 +87,7 @@ export async function sendCard(chatId, { header, body, buttons = [] }, env) {
   const card = {
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: header.title },
+      title:    { tag: 'plain_text', content: header.title },
       template: HEADER_COLORS[header.style] ?? 'blue',
     },
     elements,
@@ -112,7 +102,6 @@ export async function sendCard(chatId, { header, body, buttons = [] }, env) {
       content: JSON.stringify(card),
     }),
   });
-
   const data = await res.json();
   if (data.code !== 0) console.error('sendCard failed:', data);
   return data;
@@ -122,26 +111,17 @@ export async function sendCard(chatId, { header, body, buttons = [] }, env) {
 
 export async function replyToMessage(messageId, content, msgType = 'text', env) {
   const token = await getToken(env);
-  const url = `${env.LARK_API_URL}/im/v1/messages/${messageId}/reply`;
-
   const body = {
     content: typeof content === 'string' ? content : JSON.stringify(content),
     msg_type: msgType,
   };
-
-  const resp = await fetch(url, {
+  const resp = await fetch(`${env.LARK_API_URL}/im/v1/messages/${messageId}/reply`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-
   const data = await resp.json();
-  if (data.code !== 0) {
-    console.error('[lark] replyToMessage failed:', JSON.stringify(data));
-  }
+  if (data.code !== 0) console.error('[lark] replyToMessage failed:', JSON.stringify(data));
   return data;
 }
 
@@ -154,7 +134,7 @@ export async function replyCardToMessage(messageId, card, env) {
   );
 }
 
-// ─── Update Existing Message ──────────────────────────────────────────────────
+// ─── Document Helpers ─────────────────────────────────────────────────────────
 
 export async function getWikiNodeObjToken(wikiToken, env) {
   const token = await getToken(env);
@@ -181,34 +161,25 @@ export async function copyDocumentToRoot(docToken, title, env) {
     {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({
-        link_share_entity: 'tenant_editable',
-        copy_entity:       'tenant_editable',
-      }),
+      body: JSON.stringify({ link_share_entity: 'tenant_editable', copy_entity: 'tenant_editable' }),
     },
   );
   const permText = await permRes.text();
   try {
     const permData = JSON.parse(permText);
     if (permData.code !== 0) console.error('[lark] set permission failed:', permText);
-  } catch (_) {
-    console.log('[lark] set permission response:', permText);
-  }
+  } catch (_) {}
 
-  return data.data.file; // { token, url, name, ... }
+  return data.data.file;
 }
 
 export async function appendReportBlocks(documentId, reportText, env) {
   const token = await getToken(env);
   const lines = reportText.split('\n').filter(l => l.trim());
   const children = lines.map(line => ({
-    block_type: 2, // paragraph
-    text: {
-      elements: [{ text_run: { content: line } }],
-      style: {},
-    },
+    block_type: 2,
+    text: { elements: [{ text_run: { content: line } }], style: {} },
   }));
-
   const res = await fetch(
     `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
     {
@@ -222,7 +193,6 @@ export async function appendReportBlocks(documentId, reportText, env) {
   return data;
 }
 
-/** Return the public URL for a Lark docx file token. */
 export function getDocumentUrl(fileToken) {
   return `https://www.larksuite.com/docx/${fileToken}`;
 }
@@ -258,10 +228,7 @@ export async function uploadImageToLark(base64, mediaType, token, env) {
 
   const res = await fetch(`${env.LARK_API_URL}/drive/v1/medias/upload_all`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': `multipart/form-data; boundary=${boundary}`,
-    },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
     body: body.buffer,
   });
   const data = await res.json();
@@ -275,20 +242,15 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   const STATUS_ICON = { ok: '✓', ng: '✗ NG', corrected: '✓✏', pending: '—' };
 
   const token = await getToken(env);
-
-  // ── Effective values with priority logic ─────────────────────────────────
   const v  = session.vehicle    ?? {};
   const pl = session.pickingList ?? {};
 
-  // VIN priority: manual user input > picking list > nameplate OCR
+  // VIN priority: manual > picking list > nameplate
   const { getEffectiveSerial } = await import('../functions/generateReport.js');
   const effectiveSerial = getEffectiveSerial(session);
+  console.log('[fillReport] effectiveSerial:', effectiveSerial, 'source:', v.serialSource ?? 'none');
 
-  const serialSource = v.serialSource === 'MANUAL'  ? 'MANUAL'
-                     : pl.vin                        ? 'PICKING_LIST'
-                     : v.serial                      ? 'NAMEPLATE'
-                     : 'none';
-  console.log('[fillReport] effectiveSerial:', effectiveSerial, 'source:', serialSource);
+  // ── Block fetch helpers ───────────────────────────────────────────────────
 
   async function getAllBlocks() {
     const blocks = [];
@@ -299,7 +261,6 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         : `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks?page_size=500`;
       const res  = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
       const text = await res.text();
-      console.log('[fillReport] getAllBlocks response:', text.slice(0, 200));
       if (!text.trim()) break;
       const data = JSON.parse(text);
       blocks.push(...(data.data?.items ?? []));
@@ -313,14 +274,12 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   }
 
   async function putBlock(blockId, content) {
-    const res  = await fetch(
+    const res = await fetch(
       `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${blockId}`,
       {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          update_text_elements: { elements: [{ text_run: { content } }] },
-        }),
+        body: JSON.stringify({ update_text_elements: { elements: [{ text_run: { content } }] } }),
       },
     );
     const text = await res.text();
@@ -328,9 +287,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       try {
         const data = JSON.parse(text);
         if (data.code !== 0) console.error('[fillReport] putBlock error:', text.slice(0, 200));
-      } catch (_) {
-        console.log('[fillReport] putBlock non-JSON response:', text.slice(0, 100));
-      }
+      } catch (_) {}
     }
   }
 
@@ -344,11 +301,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     const enc = new TextEncoder();
     const parts = [];
     const addField = (name, value) => {
-      parts.push(enc.encode(
-        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
-      ));
+      parts.push(enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
     };
-    console.log('[uploadImage] parent_node:', parentNode, 'parent_type: docx_image');
     addField('file_name', 'inspection.jpg');
     addField('parent_type', 'docx_image');
     addField('parent_node', parentNode);
@@ -369,15 +323,29 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
       body: body.buffer,
     });
-    const text = await res.text();
-    console.log('[fillReport] uploadImage response:', text.slice(0, 200));
-    const data = JSON.parse(text);
+    const data = JSON.parse(await res.text());
     if (data.code !== 0) throw new Error(`uploadImage failed: ${data.msg}`);
     return data.data.file_token;
   }
 
-  async function replaceImageBlock(imageBlockId, fileToken) {
-    const updateRes = await fetch(
+  async function insertImageBlock(insertIndex) {
+    const createRes = await fetch(
+      `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ children: [{ block_type: 27, image: {} }], index: insertIndex }),
+      },
+    );
+    const createData = JSON.parse(await createRes.text());
+    const blockId = createData.data?.children?.[0]?.block_id;
+    if (!blockId) throw new Error('Failed to create image block');
+    return blockId;
+  }
+
+  async function replaceImageBlock(imageBlockId, base64, mediaType) {
+    const fileToken = await uploadImage(base64, mediaType, imageBlockId);
+    await fetch(
       `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
       {
         method: 'PATCH',
@@ -385,16 +353,17 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         body: JSON.stringify({ replace_image: { token: fileToken } }),
       },
     );
-    const updateText = await updateRes.text();
-    console.log('[fillReport] replace_image response:', updateText.slice(0, 200));
   }
 
+  // ── Initial block load ────────────────────────────────────────────────────
+
   let allBlocks    = await getAllBlocks();
-  const blockMap   = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
+  let blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
   let rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
 
   async function refreshBlocks() {
     allBlocks    = await getAllBlocks();
+    blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
     rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
   }
 
@@ -433,30 +402,25 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       if (b.block_type === 4 || b.block_type === 3) break;
       const content = b.text?.elements?.[0]?.text_run?.content ?? '';
       if (!resultBlockId && content.includes('Result')) resultBlockId = b.block_id;
-      if (!notesBlockId && content.includes('Notes')) notesBlockId = b.block_id;
+      if (!notesBlockId  && content.includes('Notes'))  notesBlockId  = b.block_id;
       if (b.block_type === 22 && dividerIdx === -1) { dividerIdx = i; break; }
     }
     sectionMap[checkId] = { resultBlockId, notesBlockId, dividerIdx };
   }
   console.log('[fillReport] sectionMap keys:', Object.keys(sectionMap));
 
-  // ── Helper: find Basic Information section divider ────────────────────────
+  // ── Helper: insert image at a given divider position ─────────────────────
 
-  function findBasicSectionDividerIdx() {
-    const basicHeadingBlock = allBlocks.find(b =>
-      (b.block_type === 4 || b.block_type === 3) &&
-      (b.heading2?.elements?.[0]?.text_run?.content?.includes('Basic') ||
-       b.heading3?.elements?.[0]?.text_run?.content?.includes('Basic'))
-    );
-    if (!basicHeadingBlock) return -1;
-    const basicHeadingIdx = rootChildren.indexOf(basicHeadingBlock.block_id);
-    if (basicHeadingIdx === -1) return -1;
-    for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
-      const b = blockMap[rootChildren[i]];
-      if (b?.block_type === 22) return i;
-      if (b?.block_type === 3 || b?.block_type === 4) return -1;
+  async function insertSectionImage(originalMsgId, imageKey, dividerIdx) {
+    if (!originalMsgId || !imageKey) return;
+    try {
+      const imageBlockId = await insertImageBlock(dividerIdx);
+      const imageData    = await downloadImage(originalMsgId, imageKey, token, env);
+      await replaceImageBlock(imageBlockId, imageData.base64, imageData.mediaType);
+      await refreshBlocks();
+    } catch (e) {
+      console.error('[fillReport] insertSectionImage failed:', e.message);
     }
-    return -1;
   }
 
   // ── Process image items ───────────────────────────────────────────────────
@@ -465,88 +429,93 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (item.type !== 'image') continue;
     if (!item.check_id || item.check_id === 'general') continue;
 
-    // ── Nameplate / picking_list: insert into Basic Information section ────
-    if (item.check_id === 'nameplate' || item.check_id === 'picking_list') {
-      if (!item.originalMsgId || !item.imageKey) continue;
-      const dividerIdx = findBasicSectionDividerIdx();
-      if (dividerIdx === -1) {
-        console.warn('[fillReport] Basic Information divider not found for:', item.check_id);
-        continue;
+    // Nameplate — Basic Information section
+    if (item.check_id === 'nameplate') {
+      const basicHeadingBlock = allBlocks.find(b =>
+        (b.block_type === 4 || b.block_type === 3) &&
+        (b.heading2?.elements?.[0]?.text_run?.content?.includes('Basic') ||
+         b.heading3?.elements?.[0]?.text_run?.content?.includes('Basic'))
+      );
+      if (!basicHeadingBlock) continue;
+      const basicHeadingIdx = rootChildren.indexOf(basicHeadingBlock.block_id);
+      let dividerIdx = -1;
+      for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
+        const b = blockMap[rootChildren[i]];
+        if (b?.block_type === 22) { dividerIdx = i; break; }
+        if (b?.block_type === 3 || b?.block_type === 4) break;
       }
-      try {
-        const createRes = await fetch(
-          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ children: [{ block_type: 27, image: {} }], index: dividerIdx }),
-          },
-        );
-        const createData = JSON.parse(await createRes.text());
-        const imageBlockId = createData.data?.children?.[0]?.block_id;
-        if (!imageBlockId) throw new Error('Failed to create image block');
-
-        const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
-        const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
-        console.log('[fillReport] image uploaded:', item.check_id, 'block:', imageBlockId, 'token:', fileToken);
-        await replaceImageBlock(imageBlockId, fileToken);
-        await refreshBlocks();
-      } catch (e) {
-        console.error(`[fillReport] ${item.check_id} image insert failed:`, e.message);
-      }
+      if (dividerIdx === -1) continue;
+      await insertSectionImage(item.originalMsgId, item.imageKey, dividerIdx);
       continue;
     }
 
-    // ── Regular section items ─────────────────────────────────────────────
+    // Picking list — Basic Information section (alongside nameplate)
+    if (item.check_id === 'picking_list') {
+      const basicHeadingBlock = allBlocks.find(b =>
+        (b.block_type === 4 || b.block_type === 3) &&
+        (b.heading2?.elements?.[0]?.text_run?.content?.includes('Basic') ||
+         b.heading3?.elements?.[0]?.text_run?.content?.includes('Basic'))
+      );
+      if (!basicHeadingBlock) continue;
+      const basicHeadingIdx = rootChildren.indexOf(basicHeadingBlock.block_id);
+      let dividerIdx = -1;
+      for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
+        const b = blockMap[rootChildren[i]];
+        if (b?.block_type === 22) { dividerIdx = i; break; }
+        if (b?.block_type === 3 || b?.block_type === 4) break;
+      }
+      if (dividerIdx === -1) continue;
+      await insertSectionImage(item.originalMsgId, item.imageKey, dividerIdx);
+      continue;
+    }
+
+    // Regular inspection section
     const section = sectionMap[item.check_id];
     if (!section) continue;
 
     const icon = STATUS_ICON[item.status] ?? '—';
-
     if (section.resultBlockId) {
       await putBlock(
         section.resultBlockId,
         `${icon} ${item.reading ?? ''}${item.note ? ' — ' + item.note : ''}`,
       );
     }
-
     if (section.notesBlockId && item.note) {
       await putBlock(section.notesBlockId, item.note);
     }
+    if (item.originalMsgId && item.imageKey && section.dividerIdx !== -1) {
+      await insertSectionImage(item.originalMsgId, item.imageKey, section.dividerIdx);
+    }
+  }
 
-    if (item.originalMsgId && item.imageKey) {
-      try {
-        const insertIndex = section.dividerIdx ?? -1;
+  // ── Fill attachment_accessories from picking list ──────────────────────────
+  // Runs after photo items so picking list data appears in Notes alongside any photo result.
+  if (pl.attachments?.length > 0 && sectionMap.attachment_accessories) {
+    const attSection = sectionMap.attachment_accessories;
+    const attText = pl.attachments
+      .map(a => `${a.name}${a.djj_code ? ' (' + a.djj_code + ')' : ''}`)
+      .join('\n');
 
-        const createRes = await fetch(
-          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ children: [{ block_type: 27, image: {} }], index: insertIndex }),
-          },
-        );
-        const createData = JSON.parse(await createRes.text());
-        const imageBlockId = createData.data?.children?.[0]?.block_id;
-        if (!imageBlockId) throw new Error('Failed to create image block');
-
-        const imageData = await downloadImage(item.originalMsgId, item.imageKey, token, env);
-        const fileToken = await uploadImage(imageData.base64, imageData.mediaType, imageBlockId);
-        console.log('[fillReport] image uploaded:', item.check_id, 'block:', imageBlockId, 'token:', fileToken);
-        await replaceImageBlock(imageBlockId, fileToken);
-        await refreshBlocks();
-      } catch (e) {
-        console.error('[lark] image insert failed:', e.message);
+    // If there's no photo-based result yet, write a placeholder result
+    if (attSection.resultBlockId) {
+      const hasPhotoItem = items.some(i => i.check_id === 'attachment_accessories' && i.type === 'image');
+      if (!hasPhotoItem) {
+        await putBlock(attSection.resultBlockId, '✓ Per picking list (photo pending)');
       }
+    }
+    // Always write attachment list to Notes block
+    if (attSection.notesBlockId) {
+      await putBlock(attSection.notesBlockId, `Picking list attachments:\n${attText}`);
     }
   }
 
   // ── Fill basic_info fields ────────────────────────────────────────────────
+
   const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
 
-  // VIN cross-check note (appended to serial field if there's a mismatch)
-  const vinMismatch = (pl.vin && v.serial && v.serialSource !== 'PICKING_LIST')
-    && pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
+  // VIN mismatch note
+  const vinMismatch = pl.vin && v.serial && v.serialSource !== 'PICKING_LIST' &&
+    pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
   const serialNote = vinMismatch ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
 
   for (const blockId of rootChildren) {
@@ -554,19 +523,12 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (!block || block.block_type !== 2) continue;
     const text = getBlockText(block);
 
-    if (text.includes('Machine Model')) {
-      await putBlock(blockId, `Machine Model / 设备型号：${v.model ?? ''}`);
-    } else if (text.includes('Serial No.') || text.includes('VIN No.')) {
-      await putBlock(blockId, `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
-    } else if (text.includes('Date / 日期')) {
-      await putBlock(blockId, `Date / 日期：${now}`);
-    } else if (text.includes('Hour Meter')) {
-      await putBlock(blockId, `Hour Meter / 小时数：${v.hours ?? ''}`);
-    } else if (text.includes('Customer') || text.includes('客户')) {
-      await putBlock(blockId, `Customer / 客户：${pl.customer ?? ''}`);
-    } else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) {
-      await putBlock(blockId, `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
-    }
+    if      (text.includes('Machine Model'))                                              await putBlock(blockId, `Machine Model / 设备型号：${v.model ?? ''}`);
+    else if (text.includes('Serial No.') || text.includes('VIN No.'))                    await putBlock(blockId, `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
+    else if (text.includes('Date / 日期'))                                                await putBlock(blockId, `Date / 日期：${now}`);
+    else if (text.includes('Hour Meter'))                                                  await putBlock(blockId, `Hour Meter / 小时数：${v.hours ?? ''}`);
+    else if (text.includes('Customer') || text.includes('客户'))                          await putBlock(blockId, `Customer / 客户：${pl.customer ?? ''}`);
+    else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) await putBlock(blockId, `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
   }
 }
 
@@ -576,13 +538,8 @@ export async function updateTextMessage(messageId, text, env) {
     `${env.LARK_API_URL}/im/v1/messages/${messageId}/content`,
     {
       method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        content: JSON.stringify({ text }),
-      }),
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: JSON.stringify({ text }) }),
     },
   );
   const data = await resp.json();
@@ -592,9 +549,6 @@ export async function updateTextMessage(messageId, text, env) {
 
 // ─── Item Result Card ─────────────────────────────────────────────────────────
 
-/**
- * 发送单张图片的分析结果卡片（引用原图，带 OK/NG/Correction 按键）
- */
 export async function sendItemCard({ messageId, chatId, count, label, reading,
   itemId, status = 'pending', note = null, showInput = null, env }) {
 
@@ -612,9 +566,6 @@ export async function sendItemCard({ messageId, chatId, count, label, reading,
   return res.json();
 }
 
-/**
- * 更新已发送的 item 卡片
- */
 export async function updateItemCard({ cardMsgId, count, label, reading,
   itemId, status, note = null, showInput = null, env }) {
 
@@ -642,7 +593,6 @@ function buildItemCard({ count, label, reading, itemId, status, note, showInput 
   const h = headerMap[status] ?? headerMap.pending;
 
   const elements = [];
-
   const noteText = note ? `\n📝 ${note}` : '';
   elements.push({
     tag: 'div',
@@ -658,17 +608,8 @@ function buildItemCard({ count, label, reading, itemId, status, note, showInput 
     elements.push({
       tag: 'action',
       actions: [
-        {
-          tag: 'button', type: 'danger',
-          text: { tag: 'plain_text', content: '确认 NG' },
-          value: { action: 'IMG_NG_SUBMIT', itemId },
-          form_value: { ng_note: '' },
-        },
-        {
-          tag: 'button', type: 'default',
-          text: { tag: 'plain_text', content: '取消' },
-          value: { action: 'IMG_CANCEL', itemId },
-        },
+        { tag: 'button', type: 'danger',  text: { tag: 'plain_text', content: '确认 NG' },  value: { action: 'IMG_NG_SUBMIT',      itemId } },
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '取消' },      value: { action: 'IMG_CANCEL',         itemId } },
       ],
     });
   } else if (showInput === 'correction') {
@@ -680,64 +621,32 @@ function buildItemCard({ count, label, reading, itemId, status, note, showInput 
     elements.push({
       tag: 'action',
       actions: [
-        {
-          tag: 'button', type: 'primary',
-          text: { tag: 'plain_text', content: '提交修正' },
-          value: { action: 'IMG_CORRECT_SUBMIT', itemId },
-          form_value: { correction_note: '' },
-        },
-        {
-          tag: 'button', type: 'default',
-          text: { tag: 'plain_text', content: '取消' },
-          value: { action: 'IMG_CANCEL', itemId },
-        },
+        { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: '提交修正' },  value: { action: 'IMG_CORRECT_SUBMIT', itemId } },
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '取消' },      value: { action: 'IMG_CANCEL',         itemId } },
       ],
     });
   } else if (status === 'pending' || status === 'ok') {
     elements.push({
       tag: 'action',
       actions: [
-        {
-          tag: 'button', type: 'default',
-          text: { tag: 'plain_text', content: 'OK ✓' },
-          value: { action: 'IMG_OK', itemId },
-        },
-        {
-          tag: 'button', type: 'danger',
-          text: { tag: 'plain_text', content: 'NG ✗' },
-          value: { action: 'IMG_NG', itemId },
-        },
-        {
-          tag: 'button', type: 'default',
-          text: { tag: 'plain_text', content: '修正 ✏️' },
-          value: { action: 'IMG_CORRECT', itemId },
-        },
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: 'OK ✓' },    value: { action: 'IMG_OK',      itemId } },
+        { tag: 'button', type: 'danger',  text: { tag: 'plain_text', content: 'NG ✗' },    value: { action: 'IMG_NG',      itemId } },
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '修正 ✏️' }, value: { action: 'IMG_CORRECT', itemId } },
       ],
     });
   } else if (status === 'ng' || status === 'corrected') {
     elements.push({
       tag: 'action',
       actions: [
-        {
-          tag: 'button', type: 'default',
-          text: { tag: 'plain_text', content: '重新编辑' },
-          value: { action: 'IMG_CORRECT', itemId },
-        },
-        {
-          tag: 'button', type: 'default',
-          text: { tag: 'plain_text', content: '标回 OK' },
-          value: { action: 'IMG_OK', itemId },
-        },
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '重新编辑' }, value: { action: 'IMG_CORRECT', itemId } },
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '标回 OK' }, value: { action: 'IMG_OK',      itemId } },
       ],
     });
   }
 
   return {
     config: { wide_screen_mode: true },
-    header: {
-      title:    { tag: 'plain_text', content: h.badge },
-      template: h.color,
-    },
+    header: { title: { tag: 'plain_text', content: h.badge }, template: h.color },
     elements,
   };
 }

@@ -54,14 +54,26 @@ Picking list schema (when check_id="picking_list"):
   "nameplate": null,
   "picking_list": {
     "customer": "company/customer name or null",
-    "invoice_number": "invoice or order number or null",
-    "vin": "VIN or Engine No. from the document, or null — extract EXACTLY as printed",
-    "model": "product model code from the document or null",
+    "invoice_number": "invoice or order number exactly as printed (e.g. INV-26113B) or null",
+    "vin": "VIN or Engine No. for the MAIN MACHINE only — extract character-for-character as printed, or null",
+    "model": "model code for the main machine only — the SHORT code only (e.g. CPD35-XAJ4-I, LM938), NOT the full product description, or null",
     "invoice_date": "date string as printed or null",
     "contact": "contact person name or null",
-    "djj_code": "DJJ product code if visible or null"
+    "djj_code": "DJJ product code for the main machine or null",
+    "attachments": [
+      {
+        "djj_code": "DJJ code for this line item or null",
+        "name": "attachment/accessory name and model as printed (e.g. GP Bucket LM938, Pallet Fork LM938, Charger)"
+      }
+    ]
   }
 }
+
+Attachments rules:
+- attachments = every line item that is NOT the main machine and NOT a shipping/freight fee
+- Examples of attachments: GP Bucket, Pallet Fork, Side Shifter, Fork Positioner, Work Light, Charger, Spare Parts
+- If no attachments exist, return "attachments": []
+- Do NOT include the main machine or shipping/freight lines in attachments
 
 Rules:
 - reading = objective observation only, never use ok/good/normal/bad/damaged
@@ -88,7 +100,6 @@ export const PROMPT_TEXT = `Extract inspection note into JSON only, no other tex
 
 // ─── API Call Helper ──────────────────────────────────────────────────────────
 
-// timeoutMs is per-attempt (not total); callers choose based on their budget
 async function callClaude(payload, env, timeoutMs = 25000) {
   const data = await withRetry(async () => {
     const controller = new AbortController();
@@ -144,7 +155,7 @@ export async function analyzeImageWithClaude(imageData, env, timeoutMs = 25000, 
 
   const payload = {
     model: env.CLAUDE_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 400,
+    max_tokens: 500,
     system: PROMPT_IMAGE + contextNote,
     messages: [{ role: 'user', content: [
       { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64 } },

@@ -23,13 +23,8 @@ const SECTION_LABEL = {
 
 // ─── VIN cross-check ──────────────────────────────────────────────────────────
 
-/**
- * Compare VIN from picking list against nameplate serial.
- * Returns an array of result lines (empty = all good).
- */
 function crossCheckVin(plVin, npSerial) {
   if (!plVin || !npSerial) return [];
-  // Normalise: uppercase, strip spaces/dashes for comparison
   const norm = (s) => s.replace(/[\s\-]/g, '').toUpperCase();
   if (norm(plVin) === norm(npSerial)) {
     return [`✅ VIN confirmed: ${plVin} matches picking list`];
@@ -41,9 +36,6 @@ function crossCheckVin(plVin, npSerial) {
   ];
 }
 
-/**
- * Build a human-readable summary of what was extracted from a picking list.
- */
 function buildPickingListSummary(pl, crossCheckLines = []) {
   const lines = ['📋 Picking list detected:'];
   if (pl.customer)        lines.push(`  Customer:  ${pl.customer}`);
@@ -53,6 +45,12 @@ function buildPickingListSummary(pl, crossCheckLines = []) {
   if (pl.model)           lines.push(`  Model:     ${pl.model}`);
   if (pl.vin)             lines.push(`  VIN:       ${pl.vin}`);
   if (pl.contact)         lines.push(`  Contact:   ${pl.contact}`);
+  if (pl.attachments && pl.attachments.length > 0) {
+    lines.push(`  Attachments:`);
+    for (const a of pl.attachments) {
+      lines.push(`    • ${a.name}${a.djj_code ? ' (' + a.djj_code + ')' : ''}`);
+    }
+  }
   if (crossCheckLines.length > 0) {
     lines.push('');
     lines.push(...crossCheckLines);
@@ -104,8 +102,19 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       if (pl.contact        && !plStore.contact)        plStore.contact        = pl.contact;
       if (pl.djj_code       && !plStore.djjCode)        plStore.djjCode        = pl.djj_code;
 
-      // If picking list has a VIN and we don't have a manually-entered serial,
-      // promote it as the pickingList source (lower priority than MANUAL)
+      // Always merge attachments (add new ones, skip duplicates by djj_code or name)
+      if (Array.isArray(pl.attachments) && pl.attachments.length > 0) {
+        if (!plStore.attachments) plStore.attachments = [];
+        for (const att of pl.attachments) {
+          const isDupe = plStore.attachments.some(
+            a => (att.djj_code && a.djj_code === att.djj_code) ||
+                 (att.name     && a.name?.toLowerCase() === att.name?.toLowerCase())
+          );
+          if (!isDupe) plStore.attachments.push(att);
+        }
+      }
+
+      // If picking list has a VIN and no manual serial exists, promote it
       if (pl.vin && session.vehicle && !session.vehicle.serial) {
         session.vehicle.serial       = pl.vin;
         session.vehicle.serialSource = 'PICKING_LIST';
