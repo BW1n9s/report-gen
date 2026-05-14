@@ -147,6 +147,49 @@ export class ImageDedupDO {
       return Response.json({ ok: true });
     }
 
+    // POST /queue-event — store event for alarm-based deferred processing
+    if (request.method === 'POST' && url.pathname === '/queue-event') {
+      const event = await request.json();
+      const pending = (await this.state.storage.get('pending-events')) ?? [];
+      pending.push(event);
+      await this.state.storage.put('pending-events', pending);
+      // Only schedule alarm if none is already pending
+      const existing = await this.state.storage.getAlarm();
+      if (!existing) {
+        await this.state.storage.setAlarm(Date.now() + 300);
+      }
+      return Response.json({ ok: true });
+    }
+
     return new Response('Not Found', { status: 404 });
+  }
+
+  // Alarm fires in a fresh execution context — no waitUntil time limit inherited
+  async alarm() {
+    const pending = (await this.state.storage.get('pending-events')) ?? [];
+    if (pending.length === 0) return;
+    await this.state.storage.delete('pending-events');
+
+    const env = this.env;
+    const { routeMessage, routeCardAction } = await import('./router.js');
+
+    for (const event of pending) {
+      try {
+        const eventId = event.header?.event_id;
+        if (eventId) {
+          const seen = await env.REPORT_SESSIONS.get(`event:${eventId}`);
+          if (seen) continue;
+          await env.REPORT_SESSIONS.put(`event:${eventId}`, '1', { expirationTtl: 86400 });
+        }
+        const eventType = event.header?.event_type;
+        if (eventType === 'im.message.receive_v1') {
+          await routeMessage(event, env);
+        } else if (eventType === 'card.action.trigger') {
+          await routeCardAction(event, env);
+        }
+      } catch (err) {
+        console.error('[DO alarm] error processing event:', err);
+      }
+    }
   }
 }
