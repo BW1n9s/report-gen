@@ -2,15 +2,15 @@ import { sendMessage, sendCard, updateItemCard } from '../services/lark.js';
 import { getSession, clearSession } from '../services/session.js';
 import { generateReport, generateReportAsLarkDoc } from './generateReport.js'; // generateReport used for SERVICE fallback
 
-async function getDoItemCount(userId, env) {
+async function getDoStatus(userId, env) {
   try {
     const id   = env.IMAGE_DEDUP.idFromName(userId);
     const stub = env.IMAGE_DEDUP.get(id);
     const res  = await stub.fetch('http://do/get-items');
     const data = await res.json();
-    return data.items?.length ?? 0;
+    return { itemCount: data.items?.length ?? 0, pendingCount: data.pendingCount ?? 0 };
   } catch (_) {
-    return 0;
+    return { itemCount: 0, pendingCount: 0 };
   }
 }
 
@@ -113,6 +113,12 @@ async function cmdSetType({ userId, chatId, type, env }) {
   const { updateSession } = await import('../services/session.js');
   await updateSession(userId, session, env);
 
+  // Reset DO items so stale records from a crashed previous session don't carry over
+  try {
+    const doStub = env.IMAGE_DEDUP.get(env.IMAGE_DEDUP.idFromName(userId));
+    await doStub.fetch('http://do/reset', { method: 'DELETE' });
+  } catch (_) {}
+
   const typeInfo = REPORT_TYPES[type];
   await sendCard(chatId, {
     header: { title: `✅ 已开始：${typeInfo.label}`, style: 'green' },
@@ -128,8 +134,8 @@ async function cmdSetType({ userId, chatId, type, env }) {
 async function cmdStatus({ userId, chatId, env }) {
   const session = await getSession(userId, env);
 
-  const doCount = await getDoItemCount(userId, env);
-  if (doCount === 0 && session.items.length === 0 && !session.report_type) {
+  const { itemCount, pendingCount } = await getDoStatus(userId, env);
+  if (itemCount === 0 && pendingCount === 0 && session.items.length === 0 && !session.report_type) {
     await sendCard(chatId, {
       header: { title: '📭 No active record', style: 'grey' },
       body: 'Start a new inspection below.',
@@ -141,7 +147,6 @@ async function cmdStatus({ userId, chatId, env }) {
     return;
   }
 
-  const images = doCount;
   const texts  = session.items.filter((i) => i.type === 'text').length;
   const since = new Date(session.created_at).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
 
@@ -149,6 +154,8 @@ async function cmdStatus({ userId, chatId, env }) {
   const vehicleLabel = session.vehicle?.model
     ? `${session.vehicle.model}${session.vehicle.serial ? ' · ' + session.vehicle.serial : ''}`
     : '⚠️ Vehicle not yet identified — send a nameplate photo';
+
+  const queueLine = pendingCount > 0 ? `\n⏳ ${pendingCount} photo(s) still analysing…` : '';
 
   // PD 时显示检查项覆盖进度
   let progressText = '';
@@ -182,7 +189,7 @@ async function cmdStatus({ userId, chatId, env }) {
 
   await sendCard(chatId, {
     header: { title: `📋 Active: ${typeLabel}`, style: 'yellow' },
-    body: `🔧 ${vehicleLabel}\n📷 ${images} photos　📝 ${texts} notes\nStarted: ${since}${progressText}${pickingListText}\n\nContinue sending photos/notes, or tap End to generate report.`,
+    body: `🔧 ${vehicleLabel}\n📷 ${itemCount} photos　📝 ${texts} notes${queueLine}\nStarted: ${since}${progressText}${pickingListText}\n\nContinue sending photos/notes, or tap End to generate report.`,
     buttons: [
       { label: 'Check Status', action: 'CHECKSTATUS', type: 'default' },
       { label: 'End', action: 'END', type: 'danger' },
@@ -213,7 +220,7 @@ async function cmdAbort({ userId, chatId, env }) {
 async function cmdEnd({ userId, chatId, env }) {
   const session = await getSession(userId, env);
 
-  const doCount = await getDoItemCount(userId, env);
+  const { itemCount: doCount } = await getDoStatus(userId, env);
   if (doCount === 0 && session.items.length === 0) {
     await sendMessage(chatId, '📭 暂无记录，请先发送图片或文字。', env);
     return;
