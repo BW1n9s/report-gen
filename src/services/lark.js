@@ -296,9 +296,23 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
   // ── Initial block load ────────────────────────────────────────────────────
 
-  const allBlocks    = await getAllBlocks();
-  const blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
-  const rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
+  const allBlocks = await getAllBlocks();
+  const blockMap  = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
+
+  // Lark Docs structure: Document block (block_id=documentId) → Page block (type=1) → Content.
+  // The document block's only child is often the page block, not the content blocks directly.
+  // We descend through type-1 wrapper blocks until we reach actual content.
+  const docBlock = allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0];
+  let rootChildren = docBlock?.children ?? [];
+  for (let depth = 0; depth < 3 && rootChildren.length === 1; depth++) {
+    const only = blockMap[rootChildren[0]];
+    if (only?.block_type === 1 && only.children?.length > 0) {
+      rootChildren = only.children;
+    } else break;
+  }
+  console.log('[fillReport] allBlocks:', allBlocks.length,
+    'rootChildren:', rootChildren.length,
+    'first-child-type:', blockMap[rootChildren[0]]?.block_type ?? 'none');
 
   // ── Build section map (with checkbox block scanning) ─────────────────────
 
@@ -321,23 +335,33 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   // Matches a leading checkbox character: □ ☐ ✓ ✗ ○ or [ ]
   const CHECKBOX_RE = /^[□☐✓✗○\[\]]\s*/;
 
+  // Extract text from any heading block type (heading1–heading9 = block_type 3–11).
+  function getHeadingText(b) {
+    for (let level = 1; level <= 9; level++) {
+      const txt = b[`heading${level}`]?.elements?.[0]?.text_run?.content;
+      if (txt) return txt;
+    }
+    return null;
+  }
+  const isHeading = (b) => b.block_type >= 3 && b.block_type <= 11 && getHeadingText(b) !== null;
+
   const sectionMap = {};
   for (const [checkId, keyword] of Object.entries(CHECK_ID_TO_KEYWORD)) {
-    const headingBlock = allBlocks.find(b =>
-      (b.block_type === 4 || b.block_type === 3) &&
-      (b.heading2?.elements?.[0]?.text_run?.content?.includes(keyword) ||
-       b.heading3?.elements?.[0]?.text_run?.content?.includes(keyword))
-    );
+    const headingBlock = allBlocks.find(b => isHeading(b) && getHeadingText(b)?.includes(keyword));
     if (!headingBlock) continue;
 
     const headingIdx = rootChildren.indexOf(headingBlock.block_id);
+    if (headingIdx === -1) {
+      console.warn('[fillReport] heading not in rootChildren:', keyword, headingBlock.block_id);
+      continue;
+    }
     let resultBlockId = null, notesBlockId = null;
     let endIdx = rootChildren.length;
 
     for (let i = headingIdx + 1; i < rootChildren.length; i++) {
       const b = blockMap[rootChildren[i]];
       if (!b) continue;
-      if (b.block_type === 4 || b.block_type === 3) { endIdx = i; break; }
+      if (isHeading(b)) { endIdx = i; break; }
       const content = b.block_type === 2
         ? (b.text?.elements?.[0]?.text_run?.content ?? '')
         : '';
