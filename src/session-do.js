@@ -64,7 +64,10 @@ export class ImageDedupDO {
         await this.state.storage.put(`msg:${payload.msgId}`, itemId);
       }
 
-      return Response.json({ count: items.length, itemId });
+      // Return the count of image-type items only so the "已分析 N 张" display
+      // isn't inflated by the many individual handwritten sub-items.
+      const imageCount = items.filter(i => i.type === 'image').length;
+      return Response.json({ count: imageCount, itemId });
     }
 
     // POST /results-bulk — bulk insert handwritten-PDI items (no msgId/dedup)
@@ -140,7 +143,8 @@ export class ImageDedupDO {
     if (request.method === 'GET' && url.pathname === '/get-items') {
       const items   = (await this.state.storage.get('items')) ?? [];
       const pending = (await this.state.storage.get('pending-events')) ?? [];
-      return Response.json({ items, pendingCount: pending.length });
+      const imageCount = items.filter(i => i.type === 'image').length;
+      return Response.json({ items, pendingCount: pending.length, imageCount });
     }
 
     // DELETE /reset
