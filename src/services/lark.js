@@ -341,7 +341,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   // ── Process image items ───────────────────────────────────────────────────
 
   for (const item of items) {
-    if (item.type !== 'image') continue;
+    if (item.type !== 'image' && item.type !== 'handwritten') continue;
     if (!item.check_id || item.check_id === 'general') continue;
 
     // nameplate and picking_list: no text blocks to fill in the template

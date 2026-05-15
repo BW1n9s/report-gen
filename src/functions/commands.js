@@ -1,6 +1,6 @@
 import { sendMessage, sendCard, updateItemCard } from '../services/lark.js';
 import { getSession, clearSession } from '../services/session.js';
-import { generateReport, generateReportAsLarkDoc } from './generateReport.js';
+import { generateReport, generateReportAsLarkDoc } from './generateReport.js'; // generateReport used for SERVICE fallback
 
 async function getDoStatus(userId, env) {
   try {
@@ -233,18 +233,47 @@ async function cmdEnd({ userId, chatId, env }) {
   await sendMessage(chatId, `📝 正在生成 ${typeLabel} 报告（共 ${totalCount} 条记录）…`, env);
 
   try {
-    const report = await generateReport(session, env);
-    await sendMessage(chatId, report, env);
-
+    // Fetch all DO items for summary stats
+    let doItems = [];
     try {
-      const docResult = await generateReportAsLarkDoc(session, env);
-      if (docResult) {
-        await sendCard(chatId, {
-          header: { title: '📄 Lark 文档已生成', style: 'green' },
-          body: `**${docResult.title}**\n\n点击下方链接查看和编辑完整交付检查报告。`,
-          buttons: [{ label: '打开文档', url: docResult.url, type: 'primary' }],
-        }, env);
+      const doId   = env.IMAGE_DEDUP.idFromName(userId);
+      const doStub = env.IMAGE_DEDUP.get(doId);
+      const res    = await doStub.fetch('http://do/get-items');
+      const data   = await res.json();
+      if (Array.isArray(data.items)) doItems = data.items;
+    } catch (_) {}
+
+    const okCount = doItems.filter(i => i.status === 'ok' || i.status === 'corrected').length;
+    const ngCount = doItems.filter(i => i.status === 'ng').length;
+    const ngItems = doItems.filter(i => i.status === 'ng');
+
+    // Vehicle / picking list summary lines
+    const v  = session.vehicle    ?? {};
+    const pl = session.pickingList ?? {};
+    const vehicleLine = [
+      v.model,
+      v.serial ? `S/N: ${v.serial}` : null,
+      v.hours  ? `${v.hours}h`       : null,
+    ].filter(Boolean).join(' · ') || '⚠️ Vehicle not identified';
+
+    let summaryBody = `🔧 ${vehicleLine}\n`;
+    if (pl.customer || pl.invoiceNumber) {
+      summaryBody += `👤 ${[pl.customer, pl.invoiceNumber].filter(Boolean).join(' · ')}\n`;
+    }
+    summaryBody += `\n✅ OK: ${okCount}　❌ NG: ${ngCount}　📷 Total: ${doItems.length}`;
+
+    if (ngItems.length > 0) {
+      summaryBody += '\n\n**⚠️ NG 项目：**\n';
+      for (const item of ngItems) {
+        const label = item.reading ?? item.check_id ?? '';
+        summaryBody += `• ${label}${item.note ? ' — ' + item.note : ''}\n`;
       }
+    }
+
+    // Try to generate Lark doc (PDI only)
+    let docResult = null;
+    try {
+      docResult = await generateReportAsLarkDoc(session, env);
     } catch (docErr) {
       console.error('[cmdEnd] Lark doc generation failed:', docErr);
       await sendMessage(
@@ -252,6 +281,23 @@ async function cmdEnd({ userId, chatId, env }) {
         `⚠️ 文档生成失败，文字报告已发送。\n错误：${docErr.message}`,
         env,
       ).catch(() => {});
+    }
+
+    const buttons = [];
+    if (docResult) {
+      buttons.push({ label: '📄 打开完整报告', url: docResult.url, type: 'primary' });
+    }
+
+    await sendCard(chatId, {
+      header: { title: `✅ ${typeLabel} 完成`, style: 'green' },
+      body: summaryBody,
+      buttons,
+    }, env);
+
+    // SERVICE type has no Lark doc — fall back to full text report
+    if (!docResult && reportType === 'SERVICE') {
+      const report = await generateReport(session, env);
+      await sendMessage(chatId, report, env);
     }
 
     await clearSession(userId, env);
