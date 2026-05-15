@@ -197,7 +197,7 @@ export function getDocumentUrl(fileToken) {
   return `https://www.larksuite.com/docx/${fileToken}`;
 }
 
-export async function uploadImageToLark(base64, mediaType, token, env) {
+export async function uploadImageToLark(base64, mediaType, token, env, parentNode = '') {
   const boundary = '----LarkBoundary' + Date.now();
   const binaryStr = atob(base64);
   const bytes = new Uint8Array(binaryStr.length);
@@ -213,7 +213,7 @@ export async function uploadImageToLark(base64, mediaType, token, env) {
   };
   addField('file_name', 'inspection.jpg');
   addField('parent_type', 'docx_image');
-  addField('parent_node', '');
+  addField('parent_node', parentNode);
   addField('size', String(size));
   parts.push(textEncoder.encode(
     `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="inspection.jpg"\r\nContent-Type: ${mediaType}\r\n\r\n`
@@ -276,23 +276,43 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     return (block.text?.elements ?? []).map(e => e.text_run?.content ?? '').join('');
   }
 
-  async function putBlock(blockId, content) {
+  async function patchBlock(blockId, body) {
     const res = await fetch(
       `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${blockId}`,
       {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ update_text_elements: { elements: [{ text_run: { content } }] } }),
+        body: JSON.stringify(body),
       },
     );
     const text = await res.text();
     if (text.trim()) {
       try {
         const data = JSON.parse(text);
-        if (data.code !== 0) console.error('[fillReport] putBlock error:', text.slice(0, 200));
+        if (data.code !== 0) console.error('[fillReport] patchBlock error:', text.slice(0, 200));
       } catch (_) {}
     }
   }
+
+  const putBlock = (blockId, content) =>
+    patchBlock(blockId, { update_text_elements: { elements: [{ text_run: { content } }] } });
+
+  const putTextBlockStyled = (blockId, content, strikethrough = false) =>
+    patchBlock(blockId, {
+      update_text_elements: {
+        elements: [{ text_run: { content, ...(strikethrough ? { text_element_style: { strikethrough: true } } : {}) } }],
+      },
+    });
+
+  // For todo blocks (block_type 17): done=true → ✅, done=false → ☐
+  // existingText is needed when applying strikethrough to preserve content.
+  const putTodoBlock = (blockId, done, existingText = '', strikethrough = false) => {
+    const body = { update_todo: { done } };
+    if (strikethrough && existingText) {
+      body.update_todo.elements = [{ text_run: { content: existingText, text_element_style: { strikethrough: true } } }];
+    }
+    return patchBlock(blockId, body);
+  };
 
   // ── Initial block load ────────────────────────────────────────────────────
 
@@ -300,21 +320,23 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   const blockMap  = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
 
   // Lark Docs structure: Document block (block_id=documentId) → Page block (type=1) → Content.
-  // The document block's only child is often the page block, not the content blocks directly.
-  // We descend through type-1 wrapper blocks until we reach actual content.
+  // Descend through type-1 wrapper blocks until we reach actual content.
   const docBlock = allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0];
+  let contentParentId = docBlock?.block_id ?? documentId;
   let rootChildren = docBlock?.children ?? [];
   for (let depth = 0; depth < 3 && rootChildren.length === 1; depth++) {
     const only = blockMap[rootChildren[0]];
     if (only?.block_type === 1 && only.children?.length > 0) {
+      contentParentId = only.block_id;
       rootChildren = only.children;
     } else break;
   }
   console.log('[fillReport] allBlocks:', allBlocks.length,
     'rootChildren:', rootChildren.length,
+    'contentParentId:', contentParentId,
     'first-child-type:', blockMap[rootChildren[0]]?.block_type ?? 'none');
 
-  // ── Build section map (with checkbox block scanning) ─────────────────────
+  // ── Build section map ─────────────────────────────────────────────────────
 
   const CHECK_ID_TO_KEYWORD = {
     attachment_accessories: 'Attachment',
@@ -335,7 +357,6 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   // Matches a leading checkbox character: □ ☐ ✓ ✗ ○ or [ ]
   const CHECKBOX_RE = /^[□☐✓✗○\[\]]\s*/;
 
-  // Extract text from any heading block type (heading1–heading9 = block_type 3–11).
   function getHeadingText(b) {
     for (let level = 1; level <= 9; level++) {
       const txt = b[`heading${level}`]?.elements?.[0]?.text_run?.content;
@@ -369,28 +390,31 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       if (!notesBlockId  && content.includes('Notes'))  notesBlockId  = b.block_id;
     }
 
-    // Collect blocks that look like checkboxes within this section.
-    // block_type 17 = native todo; block_type 2 starting with □ = text checkbox.
+    // Collect checkbox blocks and "(对应图片)" photo placeholder blocks.
+    // blockType 17 = native todo; blockType 2 starting with □ = text checkbox.
+    // rootIdx is the position in rootChildren — used for insertion offset tracking.
     const checkboxBlocks = [];
+    const photoPlaceholders = [];
     for (let i = headingIdx + 1; i < endIdx; i++) {
       const b = blockMap[rootChildren[i]];
       if (!b) continue;
       if (b.block_type === 17) {
         const text = (b.todo?.elements ?? []).map(e => e.text_run?.content ?? '').join('');
-        checkboxBlocks.push({ blockId: b.block_id, text, blockType: 17 });
+        checkboxBlocks.push({ blockId: b.block_id, text, blockType: 17, rootIdx: i });
       } else if (b.block_type === 2) {
         const text = getBlockText(b);
         if (CHECKBOX_RE.test(text)) {
-          checkboxBlocks.push({ blockId: b.block_id, text, blockType: 2 });
+          checkboxBlocks.push({ blockId: b.block_id, text, blockType: 2, rootIdx: i });
+        } else if (text.includes('对应图片') || text.trim() === '(Photo)') {
+          photoPlaceholders.push({ blockId: b.block_id, rootIdx: i, used: false });
         }
       }
     }
 
-    sectionMap[checkId] = { resultBlockId, notesBlockId, headingIdx, endIdx, checkboxBlocks };
+    sectionMap[checkId] = { resultBlockId, notesBlockId, headingIdx, endIdx, checkboxBlocks, photoPlaceholders };
   }
   console.log('[fillReport] sectionMap keys:', Object.keys(sectionMap));
 
-  // Find the checkbox block whose text best matches a sub-item label.
   function findCheckboxBlock(checkboxBlocks, label) {
     const parts = label.split('/').map(p => p.trim().toLowerCase()).filter(p => p.length > 3);
     for (const cb of checkboxBlocks) {
@@ -400,7 +424,69 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     return null;
   }
 
+  // ── Process handwritten sub-items (all statuses) ──────────────────────────
+
+  const handwrittenBySection = {};
+  for (const item of items) {
+    if (item.type !== 'handwritten') continue;
+    if (!item.check_id) continue;
+    const sectionId = ITEM_SECTION_MAP[item.check_id]
+                   ?? (sectionMap[item.check_id] ? item.check_id : null);
+    if (!sectionId) continue;
+    if (!handwrittenBySection[sectionId]) handwrittenBySection[sectionId] = [];
+    handwrittenBySection[sectionId].push(item);
+  }
+
+  for (const [sectionId, sectionItems] of Object.entries(handwrittenBySection)) {
+    const section = sectionMap[sectionId];
+    if (!section) continue;
+
+    for (const item of sectionItems) {
+      const entry = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === item.check_id);
+      if (!entry) continue;
+      const cb = findCheckboxBlock(section.checkboxBlocks, entry.label);
+      if (!cb) continue;
+
+      if (cb.blockType === 17) {
+        if (item.status === 'ok' || item.status === 'corrected') {
+          await putTodoBlock(cb.blockId, true);
+        } else if (item.status === 'n/a' || item.status === 'na') {
+          await putTodoBlock(cb.blockId, false, cb.text, true);
+        }
+        // NG: done stays false (default) — no update needed
+      } else if (cb.blockType === 2) {
+        const baseText = cb.text.replace(CHECKBOX_RE, '');
+        if (item.status === 'ok' || item.status === 'corrected') {
+          await putTextBlockStyled(cb.blockId, `✓ ${baseText}`);
+        } else if (item.status === 'ng') {
+          await putTextBlockStyled(cb.blockId, `✗ ${baseText}`);
+        } else if (item.status === 'n/a' || item.status === 'na') {
+          await putTextBlockStyled(cb.blockId, baseText, true);
+        }
+      }
+    }
+
+    if (section.resultBlockId) {
+      const hasNg        = sectionItems.some(i => i.status === 'ng');
+      const allNa        = sectionItems.every(i => i.status === 'n/a' || i.status === 'na');
+      const overallStatus = hasNg ? 'ng' : allNa ? 'n/a' : 'ok';
+      const icon         = STATUS_ICON[overallStatus] ?? '—';
+      const ngItems = sectionItems.filter(i => i.status === 'ng');
+      const ngText  = ngItems.map(i => {
+        const e = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === i.check_id);
+        const shortLabel = (e?.label ?? i.check_id).split('/')[0].trim();
+        return i.reading ? `${shortLabel}: ${i.reading}` : shortLabel;
+      }).join('; ');
+      await putBlock(section.resultBlockId, `${icon}${ngText ? ' ' + ngText : ''}`);
+    }
+  }
+
   // ── Process photo (image) items ───────────────────────────────────────────
+  // 1. Update result/notes text blocks.
+  // 2. Collect photo insertion tasks (download + upload + insert image block).
+  //    Execute insertions in rootIdx order with a running offset so indices stay correct.
+
+  const photoInsertTasks = [];
 
   for (const item of items) {
     if (item.type !== 'image') continue;
@@ -420,61 +506,44 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (section.notesBlockId && item.note) {
       await putBlock(section.notesBlockId, item.note);
     }
-  }
 
-  // ── Process handwritten sub-items ────────────────────────────────────────
-  //
-  // On Cloudflare's free tier the 50-subrequest cap means we can't tick every
-  // individual checkbox (a full form has ~50+ items).  Strategy:
-  //   • Tick ✗ on the specific checkbox block for each NG sub-item (few calls).
-  //   • Write a section-level "✓" / "✗ NG [details]" to the Result block.
-  //   • OK/NA sub-item checkbox blocks are left as-is (□).
-
-  const handwrittenBySection = {};
-  for (const item of items) {
-    if (item.type !== 'handwritten') continue;
-    if (!item.check_id) continue;
-    // Resolve whether check_id is a sub-item ID (new) or a section ID (legacy).
-    const sectionId = ITEM_SECTION_MAP[item.check_id]
-                   ?? (sectionMap[item.check_id] ? item.check_id : null);
-    if (!sectionId) continue;
-    if (!handwrittenBySection[sectionId]) handwrittenBySection[sectionId] = [];
-    handwrittenBySection[sectionId].push(item);
-  }
-
-  for (const [sectionId, sectionItems] of Object.entries(handwrittenBySection)) {
-    const section = sectionMap[sectionId];
-    if (!section) continue;
-
-    // Tick ✗ on NG checkbox blocks only (subrequest budget: ~1 call per NG item).
-    for (const item of sectionItems) {
-      if (item.status !== 'ng') continue;
-      const entry = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === item.check_id);
-      if (!entry) continue;
-      const cb = findCheckboxBlock(section.checkboxBlocks, entry.label);
-      if (!cb) continue;
-      if (cb.blockType === 2) {
-        const newText = cb.text.replace(CHECKBOX_RE, '✗ ');
-        await putBlock(cb.blockId, newText);
+    if (item.imageKey && item.originalMsgId) {
+      const placeholder = section.photoPlaceholders.find(p => !p.used);
+      if (placeholder) {
+        placeholder.used = true;
+        photoInsertTasks.push({ item, placeholderRootIdx: placeholder.rootIdx });
       }
-      // block_type 17 (todo): leave native done=false for NG — no good mapping
     }
+  }
 
-    // Section-level Result block summary.
-    if (section.resultBlockId) {
-      const hasNg        = sectionItems.some(i => i.status === 'ng');
-      const allNa        = sectionItems.every(i => i.status === 'n/a' || i.status === 'na');
-      const overallStatus = hasNg ? 'ng' : allNa ? 'n/a' : 'ok';
-      const icon         = STATUS_ICON[overallStatus] ?? '—';
-
-      const ngItems = sectionItems.filter(i => i.status === 'ng');
-      const ngText  = ngItems.map(i => {
-        const e = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === i.check_id);
-        const shortLabel = (e?.label ?? i.check_id).split('/')[0].trim();
-        return i.reading ? `${shortLabel}: ${i.reading}` : shortLabel;
-      }).join('; ');
-
-      await putBlock(section.resultBlockId, `${icon}${ngText ? ' ' + ngText : ''}`);
+  // Sort by document position so insertion offsets are monotonically increasing.
+  photoInsertTasks.sort((a, b) => a.placeholderRootIdx - b.placeholderRootIdx);
+  let insertOffset = 0;
+  for (const { item, placeholderRootIdx } of photoInsertTasks) {
+    try {
+      const imgData   = await downloadImage(item.originalMsgId, item.imageKey, token, env);
+      const fileToken = await uploadImageToLark(imgData.base64, imgData.mediaType, token, env, documentId);
+      const actualIdx = placeholderRootIdx + insertOffset + 1;
+      const res = await fetch(
+        `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${contentParentId}/children`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            children: [{ block_type: 27, image: { token: fileToken } }],
+            index: actualIdx,
+          }),
+        },
+      );
+      const data = await res.json();
+      if (data.code === 0) {
+        insertOffset++;
+        console.log('[fillReport] photo inserted for', item.check_id, 'at idx', actualIdx);
+      } else {
+        console.error('[fillReport] insertImageBlock failed:', JSON.stringify(data).slice(0, 300));
+      }
+    } catch (e) {
+      console.error('[fillReport] photo insert error:', item.check_id, e.message);
     }
   }
 
@@ -482,10 +551,6 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
   if (pl.attachments?.length > 0 && sectionMap.attachment_accessories) {
     const attSection = sectionMap.attachment_accessories;
-    const attText = pl.attachments
-      .map(a => `${a.name}${a.djj_code ? ' (' + a.djj_code + ')' : ''}`)
-      .join('\n');
-
     if (attSection.resultBlockId) {
       const hasPhotoItem = items.some(i => i.check_id === 'attachment_accessories' && i.type === 'image');
       if (!hasPhotoItem) {
@@ -493,6 +558,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       }
     }
     if (attSection.notesBlockId) {
+      const attText = pl.attachments
+        .map(a => `${a.name}${a.djj_code ? ' (' + a.djj_code + ')' : ''}`)
+        .join('\n');
       await putBlock(attSection.notesBlockId, `Picking list attachments:\n${attText}`);
     }
   }
@@ -510,11 +578,11 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (!block || block.block_type !== 2) continue;
     const text = getBlockText(block);
 
-    if      (text.includes('Machine Model'))                                                 await putBlock(blockId, `Machine Model / 设备型号：${v.model ?? ''}`);
-    else if (text.includes('Serial No.') || text.includes('VIN No.'))                       await putBlock(blockId, `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
-    else if (text.includes('Date / 日期'))                                                   await putBlock(blockId, `Date / 日期：${now}`);
-    else if (text.includes('Hour Meter'))                                                    await putBlock(blockId, `Hour Meter / 小时数：${v.hours ?? ''}`);
-    else if (text.includes('Customer') || text.includes('客户'))                            await putBlock(blockId, `Customer / 客户：${pl.customer ?? ''}`);
+    if      (text.includes('Machine Model'))                                                  await putBlock(blockId, `Machine Model / 设备型号：${v.model ?? ''}`);
+    else if (text.includes('Serial No.') || text.includes('VIN No.'))                        await putBlock(blockId, `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
+    else if (text.includes('Date / 日期'))                                                    await putBlock(blockId, `Date / 日期：${now}`);
+    else if (text.includes('Hour Meter'))                                                     await putBlock(blockId, `Hour Meter / 小时数：${v.hours ?? ''}`);
+    else if (text.includes('Customer') || text.includes('客户'))                             await putBlock(blockId, `Customer / 客户：${pl.customer ?? ''}`);
     else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) await putBlock(blockId, `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
   }
 }
