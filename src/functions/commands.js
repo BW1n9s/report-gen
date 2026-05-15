@@ -240,6 +240,11 @@ async function cmdEnd({ userId, chatId, env }) {
       }
     } catch (docErr) {
       console.error('[cmdEnd] Lark doc generation failed:', docErr);
+      await sendMessage(
+        chatId,
+        `⚠️ 文档生成失败，文字报告已发送。\n错误：${docErr.message}`,
+        env,
+      ).catch(() => {});
     }
 
     await clearSession(userId, env);
