@@ -291,81 +291,11 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
   }
 
-  async function uploadImage(base64, mediaType, parentNode) {
-    const boundary = '----LarkBoundary' + Date.now();
-    const binaryStr = atob(base64);
-    const bytes = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-    const size = bytes.length;
-
-    const enc = new TextEncoder();
-    const parts = [];
-    const addField = (name, value) => {
-      parts.push(enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
-    };
-    addField('file_name', 'inspection.jpg');
-    addField('parent_type', 'docx_image');
-    addField('parent_node', parentNode);
-    addField('size', String(size));
-    parts.push(enc.encode(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="inspection.jpg"\r\nContent-Type: ${mediaType}\r\n\r\n`
-    ));
-    parts.push(bytes);
-    parts.push(enc.encode(`\r\n--${boundary}--\r\n`));
-
-    const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
-    const body = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const part of parts) { body.set(part, offset); offset += part.length; }
-
-    const res  = await fetch(`${env.LARK_API_URL}/drive/v1/medias/upload_all`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-      body: body.buffer,
-    });
-    const data = JSON.parse(await res.text());
-    if (data.code !== 0) throw new Error(`uploadImage failed: ${data.msg}`);
-    return data.data.file_token;
-  }
-
-  async function insertImageBlock(insertIndex) {
-    const createRes = await fetch(
-      `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ children: [{ block_type: 27, image: {} }], index: insertIndex }),
-      },
-    );
-    const createData = JSON.parse(await createRes.text());
-    const blockId = createData.data?.children?.[0]?.block_id;
-    if (!blockId) throw new Error('Failed to create image block');
-    return blockId;
-  }
-
-  async function replaceImageBlock(imageBlockId, base64, mediaType) {
-    const fileToken = await uploadImage(base64, mediaType, imageBlockId);
-    await fetch(
-      `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${imageBlockId}`,
-      {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ replace_image: { token: fileToken } }),
-      },
-    );
-  }
-
   // ── Initial block load ────────────────────────────────────────────────────
 
-  let allBlocks    = await getAllBlocks();
-  let blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
-  let rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
-
-  async function refreshBlocks() {
-    allBlocks    = await getAllBlocks();
-    blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
-    rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
-  }
+  const allBlocks    = await getAllBlocks();
+  const blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
+  const rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
 
   // ── Build section map ─────────────────────────────────────────────────────
 
@@ -395,7 +325,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (!headingBlock) continue;
 
     const headingIdx = rootChildren.indexOf(headingBlock.block_id);
-    let resultBlockId = null, notesBlockId = null, dividerIdx = -1;
+    let resultBlockId = null, notesBlockId = null;
     for (let i = headingIdx + 1; i < rootChildren.length; i++) {
       const b = blockMap[rootChildren[i]];
       if (!b) continue;
@@ -403,25 +333,10 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       const content = b.text?.elements?.[0]?.text_run?.content ?? '';
       if (!resultBlockId && content.includes('Result')) resultBlockId = b.block_id;
       if (!notesBlockId  && content.includes('Notes'))  notesBlockId  = b.block_id;
-      if (b.block_type === 22 && dividerIdx === -1) { dividerIdx = i; break; }
     }
-    sectionMap[checkId] = { resultBlockId, notesBlockId, dividerIdx };
+    sectionMap[checkId] = { resultBlockId, notesBlockId };
   }
   console.log('[fillReport] sectionMap keys:', Object.keys(sectionMap));
-
-  // ── Helper: insert image at a given divider position ─────────────────────
-
-  async function insertSectionImage(originalMsgId, imageKey, dividerIdx) {
-    if (!originalMsgId || !imageKey) return;
-    try {
-      const imageBlockId = await insertImageBlock(dividerIdx);
-      const imageData    = await downloadImage(originalMsgId, imageKey, token, env);
-      await replaceImageBlock(imageBlockId, imageData.base64, imageData.mediaType);
-      await refreshBlocks();
-    } catch (e) {
-      console.error('[fillReport] insertSectionImage failed:', e.message);
-    }
-  }
 
   // ── Process image items ───────────────────────────────────────────────────
 
@@ -429,45 +344,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (item.type !== 'image') continue;
     if (!item.check_id || item.check_id === 'general') continue;
 
-    // Nameplate — Basic Information section
-    if (item.check_id === 'nameplate') {
-      const basicHeadingBlock = allBlocks.find(b =>
-        (b.block_type === 4 || b.block_type === 3) &&
-        (b.heading2?.elements?.[0]?.text_run?.content?.includes('Basic') ||
-         b.heading3?.elements?.[0]?.text_run?.content?.includes('Basic'))
-      );
-      if (!basicHeadingBlock) continue;
-      const basicHeadingIdx = rootChildren.indexOf(basicHeadingBlock.block_id);
-      let dividerIdx = -1;
-      for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
-        const b = blockMap[rootChildren[i]];
-        if (b?.block_type === 22) { dividerIdx = i; break; }
-        if (b?.block_type === 3 || b?.block_type === 4) break;
-      }
-      if (dividerIdx === -1) continue;
-      await insertSectionImage(item.originalMsgId, item.imageKey, dividerIdx);
-      continue;
-    }
-
-    // Picking list — Basic Information section (alongside nameplate)
-    if (item.check_id === 'picking_list') {
-      const basicHeadingBlock = allBlocks.find(b =>
-        (b.block_type === 4 || b.block_type === 3) &&
-        (b.heading2?.elements?.[0]?.text_run?.content?.includes('Basic') ||
-         b.heading3?.elements?.[0]?.text_run?.content?.includes('Basic'))
-      );
-      if (!basicHeadingBlock) continue;
-      const basicHeadingIdx = rootChildren.indexOf(basicHeadingBlock.block_id);
-      let dividerIdx = -1;
-      for (let i = basicHeadingIdx + 1; i < rootChildren.length; i++) {
-        const b = blockMap[rootChildren[i]];
-        if (b?.block_type === 22) { dividerIdx = i; break; }
-        if (b?.block_type === 3 || b?.block_type === 4) break;
-      }
-      if (dividerIdx === -1) continue;
-      await insertSectionImage(item.originalMsgId, item.imageKey, dividerIdx);
-      continue;
-    }
+    // nameplate and picking_list: no text blocks to fill in the template
+    if (item.check_id === 'nameplate' || item.check_id === 'picking_list') continue;
 
     // Regular inspection section
     const section = sectionMap[item.check_id];
@@ -482,9 +360,6 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
     if (section.notesBlockId && item.note) {
       await putBlock(section.notesBlockId, item.note);
-    }
-    if (item.originalMsgId && item.imageKey && section.dividerIdx !== -1) {
-      await insertSectionImage(item.originalMsgId, item.imageKey, section.dividerIdx);
     }
   }
 

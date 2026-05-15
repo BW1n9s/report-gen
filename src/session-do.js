@@ -138,8 +138,9 @@ export class ImageDedupDO {
 
     // GET /get-items
     if (request.method === 'GET' && url.pathname === '/get-items') {
-      const items = (await this.state.storage.get('items')) ?? [];
-      return Response.json({ items });
+      const items   = (await this.state.storage.get('items')) ?? [];
+      const pending = (await this.state.storage.get('pending-events')) ?? [];
+      return Response.json({ items, pendingCount: pending.length });
     }
 
     // DELETE /reset
