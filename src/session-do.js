@@ -164,32 +164,38 @@ export class ImageDedupDO {
     return new Response('Not Found', { status: 404 });
   }
 
-  // Alarm fires in a fresh execution context — no waitUntil time limit inherited
+  // Alarm fires in a fresh execution context — no waitUntil time limit inherited.
+  // Process one event per alarm so a slow Claude call never blocks subsequent events.
   async alarm() {
     const pending = (await this.state.storage.get('pending-events')) ?? [];
     if (pending.length === 0) return;
-    await this.state.storage.delete('pending-events');
+
+    const [event, ...remaining] = pending;
+    await this.state.storage.put('pending-events', remaining);
+
+    // Reschedule immediately so the next event starts as soon as this one finishes
+    if (remaining.length > 0) {
+      await this.state.storage.setAlarm(Date.now() + 100);
+    }
 
     const env = this.env;
     const { routeMessage, routeCardAction } = await import('./router.js');
 
-    for (const event of pending) {
-      try {
-        const eventId = event.header?.event_id;
-        if (eventId) {
-          const seen = await env.REPORT_SESSIONS.get(`event:${eventId}`);
-          if (seen) continue;
-          await env.REPORT_SESSIONS.put(`event:${eventId}`, '1', { expirationTtl: 86400 });
-        }
-        const eventType = event.header?.event_type;
-        if (eventType === 'im.message.receive_v1') {
-          await routeMessage(event, env);
-        } else if (eventType === 'card.action.trigger') {
-          await routeCardAction(event, env);
-        }
-      } catch (err) {
-        console.error('[DO alarm] error processing event:', err);
+    try {
+      const eventId = event.header?.event_id;
+      if (eventId) {
+        const seen = await env.REPORT_SESSIONS.get(`event:${eventId}`);
+        if (seen) return;
+        await env.REPORT_SESSIONS.put(`event:${eventId}`, '1', { expirationTtl: 86400 });
       }
+      const eventType = event.header?.event_type;
+      if (eventType === 'im.message.receive_v1') {
+        await routeMessage(event, env);
+      } else if (eventType === 'card.action.trigger') {
+        await routeCardAction(event, env);
+      }
+    } catch (err) {
+      console.error('[DO alarm] error processing event:', err);
     }
   }
 }
