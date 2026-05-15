@@ -267,9 +267,11 @@ async function cmdEnd({ userId, chatId, env }) {
       if (Array.isArray(data.items)) doItems = data.items;
     } catch (_) {}
 
-    const okCount = doItems.filter(i => i.status === 'ok' || i.status === 'corrected').length;
-    const ngCount = doItems.filter(i => i.status === 'ng').length;
-    const ngItems = doItems.filter(i => i.status === 'ng');
+    const photoItems      = doItems.filter(i => i.type === 'image');
+    const handwrittenItems = doItems.filter(i => i.type === 'handwritten');
+    const okCount  = doItems.filter(i => i.status === 'ok' || i.status === 'corrected').length;
+    const ngCount  = doItems.filter(i => i.status === 'ng').length;
+    const ngItems  = doItems.filter(i => i.status === 'ng');
 
     // Vehicle / picking list summary lines
     const v  = session.vehicle    ?? {};
@@ -284,7 +286,8 @@ async function cmdEnd({ userId, chatId, env }) {
     if (pl.customer || pl.invoiceNumber) {
       summaryBody += `👤 ${[pl.customer, pl.invoiceNumber].filter(Boolean).join(' · ')}\n`;
     }
-    summaryBody += `\n✅ OK: ${okCount}　❌ NG: ${ngCount}　📷 Total: ${doItems.length}`;
+    const photoLine = `📷 ${photoItems.length} photos${handwrittenItems.length > 0 ? `　📋 ${handwrittenItems.length} handwritten items` : ''}`;
+    summaryBody += `\n✅ OK: ${okCount}　❌ NG: ${ngCount}　${photoLine}`;
 
     if (ngItems.length > 0) {
       summaryBody += '\n\n**⚠️ NG 项目：**\n';
