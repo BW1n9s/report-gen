@@ -239,14 +239,14 @@ export async function uploadImageToLark(base64, mediaType, token, env) {
 // ─── Fill Report Into Doc ─────────────────────────────────────────────────────
 
 export async function fillReportIntoDoc(documentId, items, session, env) {
-  const STATUS_ICON = { ok: '✓', ng: '✗ NG', corrected: '✓✏', pending: '—' };
+  const STATUS_ICON = { ok: '✓', ng: '✗ NG', corrected: '✓✏', 'n/a': 'N/A', pending: '—' };
 
   const token = await getToken(env);
   const v  = session.vehicle    ?? {};
   const pl = session.pickingList ?? {};
 
-  // VIN priority: manual > picking list > nameplate
-  const { getEffectiveSerial } = await import('../functions/generateReport.js');
+  const { getEffectiveSerial }         = await import('../functions/generateReport.js');
+  const { HANDWRITTEN_ITEM_CATALOG, ITEM_SECTION_MAP } = await import('../templates/pdi-catalog.js');
   const effectiveSerial = getEffectiveSerial(session);
   console.log('[fillReport] effectiveSerial:', effectiveSerial, 'source:', v.serialSource ?? 'none');
 
@@ -270,24 +270,66 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   }
 
   function getBlockText(block) {
+    if (block.block_type === 17) {
+      return (block.todo?.elements ?? []).map(e => e.text_run?.content ?? '').join('');
+    }
     return (block.text?.elements ?? []).map(e => e.text_run?.content ?? '').join('');
   }
 
-  async function putBlock(blockId, content) {
-    const res = await fetch(
-      `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${blockId}`,
-      {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ update_text_elements: { elements: [{ text_run: { content } }] } }),
-      },
-    );
-    const text = await res.text();
-    if (text.trim()) {
-      try {
-        const data = JSON.parse(text);
-        if (data.code !== 0) console.error('[fillReport] putBlock error:', text.slice(0, 200));
-      } catch (_) {}
+  // Collect pending block updates; flush at the end with a single batch call.
+  // Each entry: { blockId, content } for text blocks, or { blockId, done } for todo blocks.
+  const pendingText = [];  // { blockId, content }
+  const pendingTodo = [];  // { blockId, done }
+
+  function queueText(blockId, content) { pendingText.push({ blockId, content }); }
+  function queueTodo(blockId, done)    { pendingTodo.push({ blockId, done }); }
+
+  async function flushUpdates() {
+    // Text blocks batch
+    for (let i = 0; i < pendingText.length; i += 50) {
+      const slice = pendingText.slice(i, i + 50);
+      const requests = slice.map(u => ({
+        block_id: u.blockId,
+        update_text_elements: { elements: [{ text_run: { content: u.content } }] },
+      }));
+      const res = await fetch(
+        `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/batch_update`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ requests }),
+        },
+      );
+      const txt = await res.text();
+      if (txt.trim()) {
+        try {
+          const d = JSON.parse(txt);
+          if (d.code !== 0) console.error('[fillReport] batch text update error:', txt.slice(0, 300));
+        } catch (_) {}
+      }
+    }
+    // Todo blocks batch
+    for (let i = 0; i < pendingTodo.length; i += 50) {
+      const slice = pendingTodo.slice(i, i + 50);
+      const requests = slice.map(u => ({
+        block_id: u.blockId,
+        update_todo: { done: u.done },
+      }));
+      const res = await fetch(
+        `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/batch_update`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ requests }),
+        },
+      );
+      const txt = await res.text();
+      if (txt.trim()) {
+        try {
+          const d = JSON.parse(txt);
+          if (d.code !== 0) console.error('[fillReport] batch todo update error:', txt.slice(0, 300));
+        } catch (_) {}
+      }
     }
   }
 
@@ -297,7 +339,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   const blockMap     = Object.fromEntries(allBlocks.map(b => [b.block_id, b]));
   const rootChildren = (allBlocks.find(b => b.block_id === documentId) ?? allBlocks[0])?.children ?? [];
 
-  // ── Build section map ─────────────────────────────────────────────────────
+  // ── Build section map (with checkbox scanning) ────────────────────────────
 
   const CHECK_ID_TO_KEYWORD = {
     attachment_accessories: 'Attachment',
@@ -315,6 +357,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     final_result:           'Final Test Result',
   };
 
+  // Regex that matches a leading checkbox character (□ ☐ ✓ ✗ or [ ])
+  const CHECKBOX_RE = /^[□☐✓✗○\[\]]\s*/;
+
   const sectionMap = {};
   for (const [checkId, keyword] of Object.entries(CHECK_ID_TO_KEYWORD)) {
     const headingBlock = allBlocks.find(b =>
@@ -326,61 +371,147 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
     const headingIdx = rootChildren.indexOf(headingBlock.block_id);
     let resultBlockId = null, notesBlockId = null;
+    let endIdx = rootChildren.length;
+
     for (let i = headingIdx + 1; i < rootChildren.length; i++) {
       const b = blockMap[rootChildren[i]];
       if (!b) continue;
-      if (b.block_type === 4 || b.block_type === 3) break;
-      const content = b.text?.elements?.[0]?.text_run?.content ?? '';
+      if (b.block_type === 4 || b.block_type === 3) { endIdx = i; break; }
+      const content = b.block_type === 2
+        ? (b.text?.elements?.[0]?.text_run?.content ?? '')
+        : '';
       if (!resultBlockId && content.includes('Result')) resultBlockId = b.block_id;
       if (!notesBlockId  && content.includes('Notes'))  notesBlockId  = b.block_id;
     }
-    sectionMap[checkId] = { resultBlockId, notesBlockId };
+
+    // Collect checkbox blocks within this section (block_type 17 = todo; block_type 2 with □)
+    const checkboxBlocks = [];
+    for (let i = headingIdx + 1; i < endIdx; i++) {
+      const b = blockMap[rootChildren[i]];
+      if (!b) continue;
+      if (b.block_type === 17) {
+        const text = (b.todo?.elements ?? []).map(e => e.text_run?.content ?? '').join('');
+        checkboxBlocks.push({ blockId: b.block_id, text, blockType: 17 });
+      } else if (b.block_type === 2) {
+        const text = getBlockText(b);
+        if (CHECKBOX_RE.test(text)) {
+          checkboxBlocks.push({ blockId: b.block_id, text, blockType: 2 });
+        }
+      }
+    }
+
+    sectionMap[checkId] = { resultBlockId, notesBlockId, headingIdx, endIdx, checkboxBlocks };
   }
   console.log('[fillReport] sectionMap keys:', Object.keys(sectionMap));
 
-  // ── Process image items ───────────────────────────────────────────────────
+  // Find the checkbox block whose text best matches a sub-item label.
+  function findCheckboxBlock(checkboxBlocks, label) {
+    // Label format: "English description / 中文描述"
+    const parts = label.split('/').map(p => p.trim().toLowerCase()).filter(p => p.length > 3);
+    for (const cb of checkboxBlocks) {
+      const cbLower = cb.text.toLowerCase().replace(CHECKBOX_RE, '');
+      if (parts.some(p => cbLower.includes(p))) return cb;
+    }
+    return null;
+  }
+
+  // Queue a checkbox tick (replaces □ in text blocks; sets done flag for todo blocks).
+  function queueCheckboxTick(cb, status) {
+    if (cb.blockType === 17) {
+      const done = status === 'ok' || status === 'corrected';
+      queueTodo(cb.blockId, done);
+    } else {
+      const icon = (status === 'ok' || status === 'corrected') ? '✓'
+                 : status === 'ng'  ? '✗'
+                 : status === 'n/a' ? '○'
+                 : '□';
+      const newText = cb.text.replace(CHECKBOX_RE, `${icon} `);
+      queueText(cb.blockId, newText);
+    }
+  }
+
+  // ── Process photo (image) items ───────────────────────────────────────────
 
   for (const item of items) {
-    if (item.type !== 'image' && item.type !== 'handwritten') continue;
+    if (item.type !== 'image') continue;
     if (!item.check_id || item.check_id === 'general') continue;
-
-    // nameplate and picking_list: no text blocks to fill in the template
     if (item.check_id === 'nameplate' || item.check_id === 'picking_list') continue;
 
-    // Regular inspection section
     const section = sectionMap[item.check_id];
     if (!section) continue;
 
     const icon = STATUS_ICON[item.status] ?? '—';
     if (section.resultBlockId) {
-      await putBlock(
+      queueText(
         section.resultBlockId,
         `${icon} ${item.reading ?? ''}${item.note ? ' — ' + item.note : ''}`,
       );
     }
     if (section.notesBlockId && item.note) {
-      await putBlock(section.notesBlockId, item.note);
+      queueText(section.notesBlockId, item.note);
+    }
+  }
+
+  // ── Process handwritten sub-items (tick individual checkboxes) ────────────
+
+  // Group sub-items by their parent section so we can compute a section-level summary.
+  const handwrittenBySection = {};
+  for (const item of items) {
+    if (item.type !== 'handwritten') continue;
+    if (!item.check_id) continue;
+    const sectionId = ITEM_SECTION_MAP[item.check_id]    // new format: sub-item ID
+                   ?? (sectionMap[item.check_id] ? item.check_id : null); // legacy: section ID
+    if (!sectionId) continue;
+    if (!handwrittenBySection[sectionId]) handwrittenBySection[sectionId] = [];
+    handwrittenBySection[sectionId].push(item);
+  }
+
+  for (const [sectionId, sectionItems] of Object.entries(handwrittenBySection)) {
+    const section = sectionMap[sectionId];
+    if (!section) continue;
+
+    // Tick each recognised sub-item's checkbox block in the document.
+    for (const item of sectionItems) {
+      const entry = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === item.check_id);
+      if (!entry) continue; // legacy section-level item — skip checkbox ticking
+      const cb = findCheckboxBlock(section.checkboxBlocks, entry.label);
+      if (cb) queueCheckboxTick(cb, item.status);
+    }
+
+    // Write section-level Result block summary.
+    if (section.resultBlockId) {
+      const hasNg  = sectionItems.some(i => i.status === 'ng');
+      const allNa  = sectionItems.every(i => i.status === 'n/a' || i.status === 'na');
+      const overallStatus = hasNg ? 'ng' : allNa ? 'n/a' : 'ok';
+      const icon = STATUS_ICON[overallStatus] ?? '—';
+
+      const ngItems = sectionItems.filter(i => i.status === 'ng');
+      const ngText  = ngItems.map(i => {
+        const e = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === i.check_id);
+        const shortLabel = (e?.label ?? i.check_id).split('/')[0].trim();
+        return i.reading ? `${shortLabel}: ${i.reading}` : shortLabel;
+      }).join('; ');
+
+      queueText(section.resultBlockId, `${icon}${ngText ? ' ' + ngText : ''}`);
     }
   }
 
   // ── Fill attachment_accessories from picking list ──────────────────────────
-  // Runs after photo items so picking list data appears in Notes alongside any photo result.
+
   if (pl.attachments?.length > 0 && sectionMap.attachment_accessories) {
     const attSection = sectionMap.attachment_accessories;
     const attText = pl.attachments
       .map(a => `${a.name}${a.djj_code ? ' (' + a.djj_code + ')' : ''}`)
       .join('\n');
 
-    // If there's no photo-based result yet, write a placeholder result
     if (attSection.resultBlockId) {
       const hasPhotoItem = items.some(i => i.check_id === 'attachment_accessories' && i.type === 'image');
       if (!hasPhotoItem) {
-        await putBlock(attSection.resultBlockId, '✓ Per picking list (photo pending)');
+        queueText(attSection.resultBlockId, '✓ Per picking list (photo pending)');
       }
     }
-    // Always write attachment list to Notes block
     if (attSection.notesBlockId) {
-      await putBlock(attSection.notesBlockId, `Picking list attachments:\n${attText}`);
+      queueText(attSection.notesBlockId, `Picking list attachments:\n${attText}`);
     }
   }
 
@@ -388,7 +519,6 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
   const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
 
-  // VIN mismatch note
   const vinMismatch = pl.vin && v.serial && v.serialSource !== 'PICKING_LIST' &&
     pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
   const serialNote = vinMismatch ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
@@ -398,13 +528,16 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (!block || block.block_type !== 2) continue;
     const text = getBlockText(block);
 
-    if      (text.includes('Machine Model'))                                              await putBlock(blockId, `Machine Model / 设备型号：${v.model ?? ''}`);
-    else if (text.includes('Serial No.') || text.includes('VIN No.'))                    await putBlock(blockId, `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
-    else if (text.includes('Date / 日期'))                                                await putBlock(blockId, `Date / 日期：${now}`);
-    else if (text.includes('Hour Meter'))                                                  await putBlock(blockId, `Hour Meter / 小时数：${v.hours ?? ''}`);
-    else if (text.includes('Customer') || text.includes('客户'))                          await putBlock(blockId, `Customer / 客户：${pl.customer ?? ''}`);
-    else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) await putBlock(blockId, `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
+    if      (text.includes('Machine Model'))                                                 queueText(blockId, `Machine Model / 设备型号：${v.model ?? ''}`);
+    else if (text.includes('Serial No.') || text.includes('VIN No.'))                       queueText(blockId, `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
+    else if (text.includes('Date / 日期'))                                                   queueText(blockId, `Date / 日期：${now}`);
+    else if (text.includes('Hour Meter'))                                                    queueText(blockId, `Hour Meter / 小时数：${v.hours ?? ''}`);
+    else if (text.includes('Customer') || text.includes('客户'))                            queueText(blockId, `Customer / 客户：${pl.customer ?? ''}`);
+    else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) queueText(blockId, `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
   }
+
+  // ── Flush all queued updates in batch requests ────────────────────────────
+  await flushUpdates();
 }
 
 export async function updateTextMessage(messageId, text, env) {
