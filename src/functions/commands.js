@@ -8,9 +8,14 @@ async function getDoStatus(userId, env) {
     const stub = env.IMAGE_DEDUP.get(id);
     const res  = await stub.fetch('http://do/get-items');
     const data = await res.json();
-    return { itemCount: data.items?.length ?? 0, pendingCount: data.pendingCount ?? 0 };
+    const items     = data.items ?? [];
+    const itemCount  = items.length;
+    const imageCount = data.imageCount ?? items.filter(i => i.type === 'image').length;
+    // Collect the set of check_ids present in the DO (used for section coverage display).
+    const coveredCheckIds = new Set(items.map(i => i.check_id).filter(Boolean));
+    return { itemCount, imageCount, pendingCount: data.pendingCount ?? 0, coveredCheckIds };
   } catch (_) {
-    return { itemCount: 0, pendingCount: 0 };
+    return { itemCount: 0, imageCount: 0, pendingCount: 0, coveredCheckIds: new Set() };
   }
 }
 
@@ -136,7 +141,7 @@ async function cmdSetType({ userId, chatId, type, env }) {
 async function cmdStatus({ userId, chatId, env }) {
   const session = await getSession(userId, env);
 
-  const { itemCount, pendingCount } = await getDoStatus(userId, env);
+  const { itemCount, imageCount, pendingCount, coveredCheckIds } = await getDoStatus(userId, env);
   if (itemCount === 0 && pendingCount === 0 && session.items.length === 0 && !session.report_type) {
     await sendCard(chatId, {
       header: { title: '📭 No active record', style: 'grey' },
@@ -159,13 +164,23 @@ async function cmdStatus({ userId, chatId, env }) {
 
   const queueLine = pendingCount > 0 ? `\n⏳ ${pendingCount} photo(s) still analysing…` : '';
 
-  // PD 时显示检查项覆盖进度
+  // PDI section coverage — count how many of the 13 doc sections have at least one item.
+  // DO items use PDI section IDs (image) or sub-item IDs (handwritten); both are resolved
+  // via ITEM_SECTION_MAP so we get the correct section count.
   let progressText = '';
-  if (normalizeReportType(session.report_type) === 'PDI' && session.vehicle?.type && session.vehicle.type !== 'UNKNOWN') {
-    const { getChecklistForType } = await import('../data/checklists.js');
-    const checklist = getChecklistForType(session.vehicle.type);
-    const coveredCount = checklist.filter((i) => session.covered_checks.includes(i.id)).length;
-    progressText = `\nChecklist coverage: ${coveredCount}/${checklist.length} items`;
+  if (normalizeReportType(session.report_type) === 'PDI') {
+    const PDI_SECTIONS = [
+      'attachment_accessories', 'visual_structure', 'fluid_levels',
+      'engine_mechanical', 'electrical_system', 'hydraulic_system',
+      'mast_fork_chain', 'loader_arm_axle', 'steering_brake_dynamic',
+      'tyre_wheel', 'safety_functions', 'maintenance_work', 'final_result',
+    ];
+    const { ITEM_SECTION_MAP } = await import('../templates/pdi-catalog.js');
+    const coveredSections = new Set(
+      [...coveredCheckIds].map(id => ITEM_SECTION_MAP[id] ?? id).filter(id => PDI_SECTIONS.includes(id))
+    );
+    const coveredCount = coveredSections.size;
+    progressText = `\nChecklist coverage: ${coveredCount}/${PDI_SECTIONS.length} sections`;
   }
 
   // Picking list summary
@@ -191,7 +206,7 @@ async function cmdStatus({ userId, chatId, env }) {
 
   await sendCard(chatId, {
     header: { title: `📋 Active: ${typeLabel}`, style: 'yellow' },
-    body: `🔧 ${vehicleLabel}\n📷 ${itemCount} photos　📝 ${texts} notes${queueLine}\nStarted: ${since}${progressText}${pickingListText}\n\nContinue sending photos/notes, or tap End to generate report.`,
+    body: `🔧 ${vehicleLabel}\n📷 ${imageCount} photos　📝 ${texts} notes${queueLine}\nStarted: ${since}${progressText}${pickingListText}\n\nContinue sending photos/notes, or tap End to generate report.`,
     buttons: [
       { label: 'Check Status', action: 'CHECKSTATUS', type: 'default' },
       { label: 'End', action: 'END', type: 'danger' },
