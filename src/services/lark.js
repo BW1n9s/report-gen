@@ -584,6 +584,23 @@ export async function updateItemCard({ cardMsgId, count, label, reading,
   return res.json();
 }
 
+const SECTION_OPTIONS = [
+  { text: { tag: 'plain_text', content: '附件配件' },  value: 'attachment_accessories' },
+  { text: { tag: 'plain_text', content: '外观结构' },  value: 'visual_structure' },
+  { text: { tag: 'plain_text', content: '油液液位' },  value: 'fluid_levels' },
+  { text: { tag: 'plain_text', content: '发动机机械' }, value: 'engine_mechanical' },
+  { text: { tag: 'plain_text', content: '电气系统' },  value: 'electrical_system' },
+  { text: { tag: 'plain_text', content: '液压系统' },  value: 'hydraulic_system' },
+  { text: { tag: 'plain_text', content: '门架链条' },  value: 'mast_fork_chain' },
+  { text: { tag: 'plain_text', content: '大臂车桥' },  value: 'loader_arm_axle' },
+  { text: { tag: 'plain_text', content: '转向刹车' },  value: 'steering_brake_dynamic' },
+  { text: { tag: 'plain_text', content: '轮胎车轮' },  value: 'tyre_wheel' },
+  { text: { tag: 'plain_text', content: '安全功能' },  value: 'safety_functions' },
+  { text: { tag: 'plain_text', content: '保养工作' },  value: 'maintenance_work' },
+  { text: { tag: 'plain_text', content: '最终结果' },  value: 'final_result' },
+  { text: { tag: 'plain_text', content: '其他' },      value: 'general' },
+];
+
 function buildItemCard({ count, label, reading, itemId, status, note, showInput }) {
   const headerMap = {
     pending:   { color: 'blue',   badge: `已分析 ${count} 张` },
@@ -626,6 +643,20 @@ function buildItemCard({ count, label, reading, itemId, status, note, showInput 
         { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '取消' },      value: { action: 'IMG_CANCEL',         itemId } },
       ],
     });
+  } else if (showInput === 'reassign') {
+    elements.push({
+      tag: 'select_static',
+      placeholder: { tag: 'plain_text', content: '选择正确的检查项目' },
+      name: 'new_check_id',
+      options: SECTION_OPTIONS,
+    });
+    elements.push({
+      tag: 'action',
+      actions: [
+        { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: '确认移动' }, value: { action: 'IMG_REASSIGN_SUBMIT', itemId } },
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '取消' },     value: { action: 'IMG_CANCEL',          itemId } },
+      ],
+    });
   } else if (status === 'pending' || status === 'ok') {
     elements.push({
       tag: 'action',
@@ -635,12 +666,24 @@ function buildItemCard({ count, label, reading, itemId, status, note, showInput 
         { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '修正 ✏️' }, value: { action: 'IMG_CORRECT', itemId } },
       ],
     });
+    elements.push({
+      tag: 'action',
+      actions: [
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '移到其他项目' }, value: { action: 'IMG_REASSIGN', itemId } },
+      ],
+    });
   } else if (status === 'ng' || status === 'corrected') {
     elements.push({
       tag: 'action',
       actions: [
         { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '重新编辑' }, value: { action: 'IMG_CORRECT', itemId } },
         { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '标回 OK' }, value: { action: 'IMG_OK',      itemId } },
+      ],
+    });
+    elements.push({
+      tag: 'action',
+      actions: [
+        { tag: 'button', type: 'default', text: { tag: 'plain_text', content: '移到其他项目' }, value: { action: 'IMG_REASSIGN', itemId } },
       ],
     });
   }

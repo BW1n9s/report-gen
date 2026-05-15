@@ -102,7 +102,7 @@ export class ImageDedupDO {
     // PATCH /item — 更新 item（OK/NG/Correction/msgId 回填）
     // body: { itemId, status?, reading?, note?, msgId?, cardMsgId? }
     if (request.method === 'PATCH' && url.pathname === '/item') {
-      const { itemId, status, reading, note, msgId, cardMsgId } = await request.json();
+      const { itemId, status, reading, note, check_id, msgId, cardMsgId } = await request.json();
       const items = (await this.state.storage.get('items')) ?? [];
       const idx   = items.findIndex(i => i.itemId === itemId);
       if (idx === -1) return Response.json({ ok: false, error: 'item not found' });
@@ -110,6 +110,7 @@ export class ImageDedupDO {
       if (status   !== undefined) items[idx].status   = status;
       if (reading  !== undefined) items[idx].reading  = reading;
       if (note     !== undefined) items[idx].note     = note;
+      if (check_id !== undefined) items[idx].check_id = check_id;
 
       // 支持 msgId 或 cardMsgId（两种调用方式）
       const newMsgId = msgId ?? cardMsgId ?? null;
@@ -164,32 +165,38 @@ export class ImageDedupDO {
     return new Response('Not Found', { status: 404 });
   }
 
-  // Alarm fires in a fresh execution context — no waitUntil time limit inherited
+  // Alarm fires in a fresh execution context — no waitUntil time limit inherited.
+  // Process one event per alarm so a slow Claude call never blocks subsequent events.
   async alarm() {
     const pending = (await this.state.storage.get('pending-events')) ?? [];
     if (pending.length === 0) return;
-    await this.state.storage.delete('pending-events');
+
+    const [event, ...remaining] = pending;
+    await this.state.storage.put('pending-events', remaining);
+
+    // Reschedule immediately so the next event starts as soon as this one finishes
+    if (remaining.length > 0) {
+      await this.state.storage.setAlarm(Date.now() + 100);
+    }
 
     const env = this.env;
     const { routeMessage, routeCardAction } = await import('./router.js');
 
-    for (const event of pending) {
-      try {
-        const eventId = event.header?.event_id;
-        if (eventId) {
-          const seen = await env.REPORT_SESSIONS.get(`event:${eventId}`);
-          if (seen) continue;
-          await env.REPORT_SESSIONS.put(`event:${eventId}`, '1', { expirationTtl: 86400 });
-        }
-        const eventType = event.header?.event_type;
-        if (eventType === 'im.message.receive_v1') {
-          await routeMessage(event, env);
-        } else if (eventType === 'card.action.trigger') {
-          await routeCardAction(event, env);
-        }
-      } catch (err) {
-        console.error('[DO alarm] error processing event:', err);
+    try {
+      const eventId = event.header?.event_id;
+      if (eventId) {
+        const seen = await env.REPORT_SESSIONS.get(`event:${eventId}`);
+        if (seen) return;
+        await env.REPORT_SESSIONS.put(`event:${eventId}`, '1', { expirationTtl: 86400 });
       }
+      const eventType = event.header?.event_type;
+      if (eventType === 'im.message.receive_v1') {
+        await routeMessage(event, env);
+      } else if (eventType === 'card.action.trigger') {
+        await routeCardAction(event, env);
+      }
+    } catch (err) {
+      console.error('[DO alarm] error processing event:', err);
     }
   }
 }
