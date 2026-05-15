@@ -87,10 +87,12 @@ export async function handleCommand({ text, userId, chatId, env }) {
 // 发送类型选择卡片
 async function cmdStart({ userId, chatId, env }) {
   const session = await getSession(userId, env);
-  if (session.items.length > 0) {
+  const { itemCount } = await getDoStatus(userId, env);
+  const total = session.items.length + itemCount;
+  if (total > 0) {
     await sendMessage(
       chatId,
-      `⚠️ 你有一个进行中的 ${REPORT_TYPES[normalizeReportType(session.report_type)]?.label ?? session.report_type} 记录（共 ${session.items.length} 条）。\n发送 END 完成报告，或 /清除 放弃当前记录。`,
+      `⚠️ 你有一个进行中的 ${REPORT_TYPES[normalizeReportType(session.report_type)]?.label ?? session.report_type} 记录（共 ${total} 条）。\n发送 END 完成报告，或 /清除 放弃当前记录。`,
       env,
     );
     return;
@@ -200,15 +202,22 @@ async function cmdStatus({ userId, chatId, env }) {
 // 中断当前 session
 async function cmdAbort({ userId, chatId, env }) {
   const session = await getSession(userId, env);
+  const { itemCount } = await getDoStatus(userId, env);
+  const total = session.items.length + itemCount;
 
-  if (session.items.length === 0 && !session.report_type) {
+  if (total === 0 && !session.report_type) {
+    // Nothing in KV or DO — wipe DO just in case and report clean
+    try {
+      const doStub = env.IMAGE_DEDUP.get(env.IMAGE_DEDUP.idFromName(userId));
+      await doStub.fetch('http://do/reset', { method: 'DELETE' });
+    } catch (_) {}
     await sendMessage(chatId, '📭 No active record to abort.', env);
     return;
   }
 
   await sendCard(chatId, {
     header: { title: '⚠️ Confirm Abort', style: 'red' },
-    body: `You have ${session.items.length} record(s) in progress. Abort will discard all records without generating a report.\n\nTap **Confirm Abort** to discard, or ignore this message to continue.`,
+    body: `You have ${total} record(s) in progress. Abort will discard all records without generating a report.\n\nTap **Confirm Abort** to discard, or ignore this message to continue.`,
     buttons: [
       { label: 'Confirm Abort', action: 'CONFIRM_ABORT', type: 'danger' },
       { label: 'Continue', action: 'CHECKSTATUS', type: 'primary' },

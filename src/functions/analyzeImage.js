@@ -1,8 +1,7 @@
 import { getToken, downloadImage, replyToMessage, sendItemCard } from '../services/lark.js';
 import { analyzeImageWithClaude } from '../services/claude.js';
 import { getSession, updateSession } from '../services/session.js';
-import { template as forkliftPdiTemplate } from '../templates/pd_forklift.js';
-import { template as loaderPdiTemplate } from '../templates/pd_loader.js';
+import { HANDWRITTEN_ITEM_CATALOG, ITEM_SECTION_MAP } from '../templates/pdi-catalog.js';
 
 const SECTION_LABEL = {
   attachment_accessories:  '附件配件',
@@ -22,31 +21,6 @@ const SECTION_LABEL = {
   picking_list:            '提货单',
   general:                 '其他',
 };
-
-// ─── Handwritten PDI item catalog ─────────────────────────────────────────────
-
-// Deduplicated union of all sub-items from both PDI templates (forklift + loader)
-const HANDWRITTEN_ITEM_CATALOG = (() => {
-  const seen = new Set();
-  const catalog = [];
-  for (const tmpl of [forkliftPdiTemplate, loaderPdiTemplate]) {
-    for (const section of tmpl.sections) {
-      if (!Array.isArray(section.items)) continue;
-      for (const item of section.items) {
-        if (!seen.has(item.id)) {
-          seen.add(item.id);
-          catalog.push({ id: item.id, label: item.label, section: section.id });
-        }
-      }
-    }
-  }
-  return catalog;
-})();
-
-// Map: sub-item ID → parent section ID
-const ITEM_SECTION_MAP = Object.fromEntries(
-  HANDWRITTEN_ITEM_CATALOG.map(i => [i.id, i.section]),
-);
 
 // ─── VIN cross-check ──────────────────────────────────────────────────────────
 
@@ -117,44 +91,17 @@ async function handleHandwrittenPdi(imageKey, messageId, imageData, session, use
     return;
   }
 
-  // Group detected sub-items by their parent section
-  const sectionGroups = {};
-  for (const item of validItems) {
-    const sectionId = ITEM_SECTION_MAP[item.item_id];
-    if (!sectionGroups[sectionId]) sectionGroups[sectionId] = [];
-    sectionGroups[sectionId].push(item);
-  }
+  // Store each recognised sub-item individually so fillReportIntoDoc can tick
+  // the correct checkbox block in the template document.
+  const doItems = validItems.map(si => ({
+    check_id:      si.item_id,                         // sub-item ID (e.g. 'fl_engine_oil')
+    reading:       si.reading ?? '',
+    status:        si.status === 'na' ? 'n/a' : si.status,
+    imageKey,
+    originalMsgId: messageId,
+  }));
 
-  // For each section: determine overall status (ng > na > ok) and build reading text
-  const STATUS_RANK = { ng: 3, na: 2, ok: 1 };
-  const doItems = [];
-
-  for (const [sectionId, sItems] of Object.entries(sectionGroups)) {
-    let topStatus = 'ok';
-    for (const si of sItems) {
-      if ((STATUS_RANK[si.status] ?? 0) > (STATUS_RANK[topStatus] ?? 0)) {
-        topStatus = si.status;
-      }
-    }
-    const storedStatus = topStatus === 'na' ? 'n/a' : topStatus;
-
-    const readingParts = sItems.map(si => {
-      const entry = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === si.item_id);
-      const shortLabel = (entry?.label ?? si.item_id).split('/')[0].trim();
-      const icon = si.status === 'ok' ? '✓' : si.status === 'ng' ? '✗' : 'N/A';
-      return si.reading ? `${shortLabel}: ${icon} (${si.reading})` : `${shortLabel}: ${icon}`;
-    });
-
-    doItems.push({
-      check_id:      sectionId,
-      reading:       readingParts.join(' | '),
-      status:        storedStatus,
-      imageKey,
-      originalMsgId: messageId,
-    });
-  }
-
-  // Bulk-store all section items in DO
+  // Bulk-store all individual items in DO
   const doId   = env.IMAGE_DEDUP.idFromName(userId);
   const doStub = env.IMAGE_DEDUP.get(doId);
   await doStub.fetch('http://do/results-bulk', {
@@ -164,7 +111,8 @@ async function handleHandwrittenPdi(imageKey, messageId, imageData, session, use
   });
 
   // Update covered_checks in session for newly covered sections
-  const newSections = Object.keys(sectionGroups).filter(
+  const uniqueSections = [...new Set(validItems.map(si => ITEM_SECTION_MAP[si.item_id]))].filter(Boolean);
+  const newSections = uniqueSections.filter(
     id => !session.covered_checks.includes(id),
   );
   if (newSections.length > 0) {
@@ -179,7 +127,7 @@ async function handleHandwrittenPdi(imageKey, messageId, imageData, session, use
   const naCnt = validItems.filter(i => i.status === 'na').length;
 
   let summary = `📋 手写 PDI 表格识别完成\n`;
-  summary += `共识别 ${total} 项，涉及 ${doItems.length} 个板块\n`;
+  summary += `共识别 ${total} 项，涉及 ${uniqueSections.length} 个板块\n`;
   summary += `✓ OK: ${okCnt}　✗ NG: ${ngCnt}　N/A: ${naCnt}`;
 
   const ngItems = validItems.filter(i => i.status === 'ng');
