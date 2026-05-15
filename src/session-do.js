@@ -102,7 +102,7 @@ export class ImageDedupDO {
     // PATCH /item — 更新 item（OK/NG/Correction/msgId 回填）
     // body: { itemId, status?, reading?, note?, msgId?, cardMsgId? }
     if (request.method === 'PATCH' && url.pathname === '/item') {
-      const { itemId, status, reading, note, msgId, cardMsgId } = await request.json();
+      const { itemId, status, reading, note, check_id, msgId, cardMsgId } = await request.json();
       const items = (await this.state.storage.get('items')) ?? [];
       const idx   = items.findIndex(i => i.itemId === itemId);
       if (idx === -1) return Response.json({ ok: false, error: 'item not found' });
@@ -110,6 +110,7 @@ export class ImageDedupDO {
       if (status   !== undefined) items[idx].status   = status;
       if (reading  !== undefined) items[idx].reading  = reading;
       if (note     !== undefined) items[idx].note     = note;
+      if (check_id !== undefined) items[idx].check_id = check_id;
 
       // 支持 msgId 或 cardMsgId（两种调用方式）
       const newMsgId = msgId ?? cardMsgId ?? null;

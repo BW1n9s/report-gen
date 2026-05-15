@@ -14,6 +14,7 @@ const COMMAND_KEYWORDS = new Set([
 const ITEM_CARD_ACTIONS = new Set([
   'IMG_OK', 'IMG_NG', 'IMG_CORRECT',
   'IMG_NG_SUBMIT', 'IMG_CORRECT_SUBMIT', 'IMG_CANCEL',
+  'IMG_REASSIGN', 'IMG_REASSIGN_SUBMIT',
 ]);
 
 // 通过 DO 检查 imageKey 是否已处理过（原子操作）

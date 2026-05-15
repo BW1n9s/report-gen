@@ -335,4 +335,16 @@ export async function handleItemCardAction({ action, itemId, formValues, userId,
   if (action === 'IMG_CANCEL') {
     await updateCard(); // redraw without showInput
   }
+
+  if (action === 'IMG_REASSIGN') {
+    await updateCard({ showInput: 'reassign' });
+  }
+
+  if (action === 'IMG_REASSIGN_SUBMIT') {
+    const newCheckId = formValues?.new_check_id;
+    if (!newCheckId) return;
+    await patch({ check_id: newCheckId });
+    item.check_id = newCheckId;
+    await updateCard({ label: ITEM_SECTION_LABEL[newCheckId] ?? newCheckId });
+  }
 }
