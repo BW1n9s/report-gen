@@ -426,7 +426,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   // ── Process image items ───────────────────────────────────────────────────
 
   for (const item of items) {
-    if (item.type !== 'image') continue;
+    if (item.type !== 'image' && item.type !== 'handwritten') continue;
     if (!item.check_id || item.check_id === 'general') continue;
 
     // Nameplate — Basic Information section
@@ -483,7 +483,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     if (section.notesBlockId && item.note) {
       await putBlock(section.notesBlockId, item.note);
     }
-    if (item.originalMsgId && item.imageKey && section.dividerIdx !== -1) {
+    // Only insert per-section photos for individually captured images, not handwritten forms
+    if (item.type === 'image' && item.originalMsgId && item.imageKey && section.dividerIdx !== -1) {
       await insertSectionImage(item.originalMsgId, item.imageKey, section.dividerIdx);
     }
   }
