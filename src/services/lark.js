@@ -394,8 +394,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       const content = b.block_type === 2
         ? (b.text?.elements?.[0]?.text_run?.content ?? '')
         : '';
-      if (!resultBlockId && content.includes('Result')) resultBlockId = b.block_id;
-      if (!notesBlockId  && content.includes('Notes'))  notesBlockId  = b.block_id;
+      if (!resultBlockId && (content.includes('Result') || content.includes('对应图片分析'))) resultBlockId = b.block_id;
+      if (!notesBlockId  && (content.includes('Notes')  || content.includes('备注')))       notesBlockId  = b.block_id;
     }
 
     // Collect checkbox blocks and "(对应图片)" photo placeholder blocks.
@@ -413,7 +413,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         const text = getBlockText(b);
         if (CHECKBOX_RE.test(text)) {
           checkboxBlocks.push({ blockId: b.block_id, text, blockType: 2, rootIdx: i });
-        } else if (text.includes('对应图片') || text.trim() === '(Photo)') {
+        } else if ((text.includes('对应图片') && !text.includes('分析')) || text.trim() === '(Photo)') {
           photoPlaceholders.push({ blockId: b.block_id, rootIdx: i, used: false });
         }
       }
@@ -519,7 +519,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       const placeholder = section.photoPlaceholders.find(p => !p.used);
       if (placeholder) {
         placeholder.used = true;
-        photoInsertTasks.push({ item, placeholderRootIdx: placeholder.rootIdx });
+        photoInsertTasks.push({ item, placeholderRootIdx: placeholder.rootIdx, placeholderBlockId: placeholder.blockId });
       }
     }
   }
@@ -744,28 +744,37 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     return origIdx - shift;
   }
 
-  // Add nameplate photo tasks → insert after Serial No. block
+  // Add nameplate photo tasks → insert after Serial No. block (no placeholder to delete)
   if (serialRootIdx !== -1) {
     for (const item of items.filter(i => i.type === 'image' && i.check_id === 'nameplate' && i.imageKey && i.originalMsgId)) {
-      photoInsertTasks.push({ item, placeholderRootIdx: serialRootIdx });
+      photoInsertTasks.push({ item, placeholderRootIdx: serialRootIdx, placeholderBlockId: null });
     }
   }
 
-  // Add hour-meter photo tasks → insert after Hour Meter block
+  // Add hour-meter photo tasks → insert after Hour Meter block (no placeholder to delete)
   if (hourMeterRootIdx !== -1) {
     for (const item of items.filter(i => i.type === 'image' && i.check_id === 'hour_meter' && i.imageKey && i.originalMsgId)) {
-      photoInsertTasks.push({ item, placeholderRootIdx: hourMeterRootIdx });
+      photoInsertTasks.push({ item, placeholderRootIdx: hourMeterRootIdx, placeholderBlockId: null });
     }
   }
 
-  // Sort all insertions by adjusted position (top → bottom), insert with running offset
+  // Sort all insertions by adjusted position (top → bottom), insert with running offset.
+  // PDI placeholder tasks (placeholderBlockId set): insert AT the placeholder position then
+  // delete the placeholder text block — net index change is 0 when both succeed.
+  // Nameplate/hour-meter tasks (placeholderBlockId null): insert AFTER the label block.
   photoInsertTasks.sort((a, b) => toAdjIdx(a.placeholderRootIdx) - toAdjIdx(b.placeholderRootIdx));
   let insertOffset = 0;
-  for (const { item, placeholderRootIdx } of photoInsertTasks) {
+  for (const { item, placeholderRootIdx, placeholderBlockId } of photoInsertTasks) {
     try {
       const imgData   = await downloadImage(item.originalMsgId, item.imageKey, token, env);
       const fileToken = await uploadImageToLark(imgData.base64, imgData.mediaType, token, env, documentId);
-      const actualIdx = toAdjIdx(placeholderRootIdx) + insertOffset + 1;
+
+      // For PDI placeholders: insert AT the placeholder index so image takes its place.
+      // For nameplate/hour-meter labels: insert AFTER (+1) to keep the text line.
+      const actualIdx = placeholderBlockId
+        ? toAdjIdx(placeholderRootIdx) + insertOffset
+        : toAdjIdx(placeholderRootIdx) + insertOffset + 1;
+
       const res = await fetch(
         `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${contentParentId}/children`,
         {
@@ -781,6 +790,26 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       if (data.code === 0) {
         insertOffset++;
         console.log('[fillReport] photo inserted for', item.check_id, 'at idx', actualIdx);
+
+        if (placeholderBlockId) {
+          // Delete the placeholder text block (shifted to actualIdx + 1 after insertion)
+          const delRes = await fetch(
+            `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${contentParentId}/children`,
+            {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ start_index: actualIdx + 1, end_index: actualIdx + 2 }),
+            },
+          );
+          const delTxt = await delRes.text();
+          let delOk = false;
+          try { delOk = JSON.parse(delTxt).code === 0; } catch (_) { delOk = true; }
+          if (delOk) {
+            insertOffset--;  // insert +1 and delete -1 = net 0 for subsequent tasks
+          } else {
+            console.error('[fillReport] placeholder delete failed:', delTxt.slice(0, 200));
+          }
+        }
       } else {
         console.error('[fillReport] insertImageBlock failed:', JSON.stringify(data).slice(0, 300));
       }
