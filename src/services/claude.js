@@ -21,6 +21,7 @@ Section IDs — pick the single best match:
   fluid_levels           — any fluid level, coolant, fuel, hydraulic oil, fluid leaks
   engine_mechanical      — engine start/idle, belts, air filter, exhaust, mounts
   electrical_system      — battery, lights, horn, dashboard, Curtis controller
+  hour_meter             — instrument panel close-up showing hour meter / odometer reading (NOT the full dashboard overview)
   hydraulic_system       — pump, hoses, cylinders, lift/tilt/sideshift/valve
   mast_fork_chain        — mast rails, chains, fork arms, carriage (forklifts)
   loader_arm_axle        — loader arm, axles, bucket pins (loaders)

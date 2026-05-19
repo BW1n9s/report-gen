@@ -516,14 +516,248 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
   }
 
-  // Sort by document position so insertion offsets are monotonically increasing.
-  photoInsertTasks.sort((a, b) => a.placeholderRootIdx - b.placeholderRootIdx);
+  // ── Fill attachment_accessories PDI section from picking list ────────────────
+
+  if (pl.attachments?.length > 0 && sectionMap.attachment_accessories) {
+    const attSection = sectionMap.attachment_accessories;
+    if (attSection.resultBlockId) {
+      const hasPhotoItem = items.some(i => i.check_id === 'attachment_accessories' && i.type === 'image');
+      if (!hasPhotoItem) {
+        await putBlock(attSection.resultBlockId, '✓ Per picking list (photo pending)');
+      }
+    }
+    if (attSection.notesBlockId) {
+      const attText = pl.attachments
+        .map(a => `${a.name}${a.djj_code ? ' (' + a.djj_code + ')' : ''}`)
+        .join('\n');
+      await putBlock(attSection.notesBlockId, `Picking list attachments:\n${attText}`);
+    }
+  }
+
+  // ── Fill basic_info fields (record indices for photo insertion later) ─────
+
+  const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
+
+  const vinMismatch = pl.vin && v.serial && v.serialSource !== 'PICKING_LIST' &&
+    pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
+  const serialNote = vinMismatch ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
+
+  let serialRootIdx    = -1;
+  let hourMeterRootIdx = -1;
+
+  for (let i = 0; i < rootChildren.length; i++) {
+    const block = blockMap[rootChildren[i]];
+    if (!block || block.block_type !== 2) continue;
+    const text = getBlockText(block);
+
+    if (text.includes('Machine Model')) {
+      await putBlock(rootChildren[i], `Machine Model / 设备型号：${v.model ?? ''}`);
+    } else if (text.includes('Serial No.') || text.includes('VIN No.')) {
+      serialRootIdx = i;
+      await putBlock(rootChildren[i], `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
+    } else if (text.includes('Date / 日期')) {
+      await putBlock(rootChildren[i], `Date / 日期：${now}`);
+    } else if (text.includes('Hour Meter')) {
+      hourMeterRootIdx = i;
+      await putBlock(rootChildren[i], `Hour Meter / 小时数：${v.hours ?? ''}`);
+    } else if (text.includes('Customer') || text.includes('客户')) {
+      await putBlock(rootChildren[i], `Customer / 客户：${pl.customer ?? ''}`);
+    } else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) {
+      await putBlock(rootChildren[i], `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
+    }
+  }
+
+  // ── Helpers: find checkbox section range ──────────────────────────────────
+  // Returns { start, end } indices in rootChildren (end exclusive).
+  // Starts searching from headerIdx+1 and collects consecutive checkbox / empty blocks.
+
+  function findCheckboxSectionRange(headerIdx) {
+    let start = headerIdx + 1;
+    let end   = start;
+    for (let i = start; i < rootChildren.length; i++) {
+      const b = blockMap[rootChildren[i]];
+      if (!b) continue;
+      const text = getBlockText(b);
+      const isCb = b.block_type === 17 || (b.block_type === 2 && CHECKBOX_RE.test(text));
+      const isEmpty = !text.trim();
+      if (isCb || isEmpty) {
+        if (isCb) end = i + 1;  // extend end only on actual checkbox
+      } else {
+        break;  // non-checkbox non-empty block terminates the section
+      }
+    }
+    return { start, end };
+  }
+
+  const toDeleteIndices = [];
+
+  // ── Machine type option selection ─────────────────────────────────────────
+
+  const MACHINE_TYPE_OPTIONS = [
+    { keyword: 'Diesel Forklift',   types: ['FORKLIFT_ICE', 'FORKLIFT_DIESEL'] },
+    { keyword: 'Duel Fuel',         types: ['FORKLIFT_LPG', 'FORKLIFT_PETROL', 'FORKLIFT_GAS'] },
+    { keyword: 'Electric Forklift', types: ['FORKLIFT_ELECTRIC'] },
+    { keyword: 'Walkie',            types: ['FORKLIFT_WALKIE'] },
+    { keyword: 'Order Picker',      types: ['ORDER_PICKER'] },
+    { keyword: 'Reach Truck',       types: ['REACH_TRUCK'] },
+    { keyword: 'Other',             types: [] },  // catch-all
+  ];
+
+  const vehicleType = v.type ?? '';
+  const mtHeaderIdx = rootChildren.findIndex(id => {
+    const b = blockMap[id];
+    return b && getBlockText(b).includes('Machine Type Options');
+  });
+
+  if (mtHeaderIdx !== -1 && vehicleType && vehicleType !== 'UNKNOWN') {
+    const { start: mtStart, end: mtEnd } = findCheckboxSectionRange(mtHeaderIdx);
+    const matchedMtKw = MACHINE_TYPE_OPTIONS.find(o => o.types.includes(vehicleType))?.keyword ?? 'Other';
+
+    for (let i = mtStart; i < mtEnd; i++) {
+      const b = blockMap[rootChildren[i]];
+      if (!b) continue;
+      const text = getBlockText(b);
+      const isCb = b.block_type === 17 || (b.block_type === 2 && CHECKBOX_RE.test(text));
+      if (!isCb) continue;
+
+      const opt = MACHINE_TYPE_OPTIONS.find(o => text.includes(o.keyword));
+      if (!opt) continue;
+
+      if (opt.keyword === matchedMtKw) {
+        if (b.block_type === 17) await putTodoBlock(b.block_id, true);
+        else await putTextBlockStyled(b.block_id, `✓ ${text.replace(CHECKBOX_RE, '')}`);
+      } else {
+        toDeleteIndices.push(i);
+      }
+    }
+  }
+
+  // ── Attachment equipment selection ────────────────────────────────────────
+
+  const ATT_OPTIONS = [
+    { keyword: 'Side Shift',  match: n => n.includes('side shift') || n.includes('sideshift') },
+    { keyword: 'Positioner',  match: n => n.includes('positioner') },
+    { keyword: 'Charger',     match: n => n.includes('charger') },
+    { keyword: 'Forks',       match: n => /\bfork/.test(n) },
+  ];
+
+  const plAttachments = session.pickingList?.attachments;
+  if (Array.isArray(plAttachments)) {
+    // Find section by locating the first attachment-specific block
+    const attAnchorIdx = rootChildren.findIndex(id => {
+      const b = blockMap[id];
+      if (!b) return false;
+      const t = getBlockText(b).toLowerCase();
+      return ATT_OPTIONS.some(o => t.includes(o.keyword.toLowerCase()));
+    });
+
+    if (attAnchorIdx !== -1) {
+      // Walk back to find true section start (in case Side Shift isn't first)
+      let attStart = attAnchorIdx;
+      while (attStart > 0) {
+        const prev = blockMap[rootChildren[attStart - 1]];
+        if (!prev) break;
+        const prevText = getBlockText(prev);
+        const isPrevCb = prev.block_type === 17 || (prev.block_type === 2 && CHECKBOX_RE.test(prevText));
+        if (isPrevCb) attStart--;
+        else break;
+      }
+      const { end: attEnd } = findCheckboxSectionRange(attStart - 1);
+
+      const unmatched = plAttachments.filter(
+        att => !ATT_OPTIONS.some(o => o.match(att.name.toLowerCase()))
+      );
+
+      for (let i = attStart; i < attEnd; i++) {
+        const b = blockMap[rootChildren[i]];
+        if (!b) continue;
+        const text  = getBlockText(b);
+        const isCb  = b.block_type === 17 || (b.block_type === 2 && CHECKBOX_RE.test(text));
+        if (!isCb) continue;
+
+        const stdOpt = ATT_OPTIONS.find(o => text.toLowerCase().includes(o.keyword.toLowerCase()));
+        if (stdOpt) {
+          const keep = plAttachments.some(a => stdOpt.match(a.name.toLowerCase()));
+          if (keep) {
+            if (b.block_type === 17) await putTodoBlock(b.block_id, true);
+            else await putTextBlockStyled(b.block_id, `✓ ${text.replace(CHECKBOX_RE, '')}`);
+          } else {
+            toDeleteIndices.push(i);
+          }
+        } else if (text.includes('Other')) {
+          if (unmatched.length > 0) {
+            const otherNames = unmatched.map(a => a.name).join(', ');
+            const newText = `Other / 其他：${otherNames}`;
+            if (b.block_type === 17) await putTodoBlock(b.block_id, true, newText);
+            else await putTextBlockStyled(b.block_id, `✓ ${newText}`);
+          } else {
+            toDeleteIndices.push(i);
+          }
+        }
+      }
+    }
+  }
+
+  // ── Execute block deletions (high → low to preserve lower indices) ────────
+
+  const deletedSet = new Set();
+  if (toDeleteIndices.length > 0) {
+    const sorted = [...new Set(toDeleteIndices)].sort((a, b) => b - a);
+    for (const idx of sorted) {
+      const res = await fetch(
+        `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${contentParentId}/children`,
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ start_index: idx, end_index: idx + 1 }),
+        },
+      );
+      const txt = await res.text();
+      if (txt.trim()) {
+        try {
+          const d = JSON.parse(txt);
+          if (d.code === 0) deletedSet.add(idx);
+          else console.error('[fillReport] deleteBlock err at idx', idx, ':', txt.slice(0, 200));
+        } catch (_) { deletedSet.add(idx); }
+      } else {
+        deletedSet.add(idx);
+      }
+    }
+    console.log('[fillReport] deleted', deletedSet.size, 'option blocks');
+  }
+
+  // ── Photo insertions (PDI placeholders + nameplate + hour_meter) ──────────
+  // Adjust original rootChildren indices for any blocks deleted above, then
+  // insert from top to bottom with a running offset.
+
+  function toAdjIdx(origIdx) {
+    let shift = 0;
+    for (const d of deletedSet) { if (d < origIdx) shift++; }
+    return origIdx - shift;
+  }
+
+  // Add nameplate photo tasks → insert after Serial No. block
+  if (serialRootIdx !== -1) {
+    for (const item of items.filter(i => i.type === 'image' && i.check_id === 'nameplate' && i.imageKey && i.originalMsgId)) {
+      photoInsertTasks.push({ item, placeholderRootIdx: serialRootIdx });
+    }
+  }
+
+  // Add hour-meter photo tasks → insert after Hour Meter block
+  if (hourMeterRootIdx !== -1) {
+    for (const item of items.filter(i => i.type === 'image' && i.check_id === 'hour_meter' && i.imageKey && i.originalMsgId)) {
+      photoInsertTasks.push({ item, placeholderRootIdx: hourMeterRootIdx });
+    }
+  }
+
+  // Sort all insertions by adjusted position (top → bottom), insert with running offset
+  photoInsertTasks.sort((a, b) => toAdjIdx(a.placeholderRootIdx) - toAdjIdx(b.placeholderRootIdx));
   let insertOffset = 0;
   for (const { item, placeholderRootIdx } of photoInsertTasks) {
     try {
       const imgData   = await downloadImage(item.originalMsgId, item.imageKey, token, env);
       const fileToken = await uploadImageToLark(imgData.base64, imgData.mediaType, token, env, documentId);
-      const actualIdx = placeholderRootIdx + insertOffset + 1;
+      const actualIdx = toAdjIdx(placeholderRootIdx) + insertOffset + 1;
       const res = await fetch(
         `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${contentParentId}/children`,
         {
@@ -545,45 +779,6 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     } catch (e) {
       console.error('[fillReport] photo insert error:', item.check_id, e.message);
     }
-  }
-
-  // ── Fill attachment_accessories from picking list ──────────────────────────
-
-  if (pl.attachments?.length > 0 && sectionMap.attachment_accessories) {
-    const attSection = sectionMap.attachment_accessories;
-    if (attSection.resultBlockId) {
-      const hasPhotoItem = items.some(i => i.check_id === 'attachment_accessories' && i.type === 'image');
-      if (!hasPhotoItem) {
-        await putBlock(attSection.resultBlockId, '✓ Per picking list (photo pending)');
-      }
-    }
-    if (attSection.notesBlockId) {
-      const attText = pl.attachments
-        .map(a => `${a.name}${a.djj_code ? ' (' + a.djj_code + ')' : ''}`)
-        .join('\n');
-      await putBlock(attSection.notesBlockId, `Picking list attachments:\n${attText}`);
-    }
-  }
-
-  // ── Fill basic_info fields ────────────────────────────────────────────────
-
-  const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
-
-  const vinMismatch = pl.vin && v.serial && v.serialSource !== 'PICKING_LIST' &&
-    pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
-  const serialNote = vinMismatch ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
-
-  for (const blockId of rootChildren) {
-    const block = blockMap[blockId];
-    if (!block || block.block_type !== 2) continue;
-    const text = getBlockText(block);
-
-    if      (text.includes('Machine Model'))                                                  await putBlock(blockId, `Machine Model / 设备型号：${v.model ?? ''}`);
-    else if (text.includes('Serial No.') || text.includes('VIN No.'))                        await putBlock(blockId, `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
-    else if (text.includes('Date / 日期'))                                                    await putBlock(blockId, `Date / 日期：${now}`);
-    else if (text.includes('Hour Meter'))                                                     await putBlock(blockId, `Hour Meter / 小时数：${v.hours ?? ''}`);
-    else if (text.includes('Customer') || text.includes('客户'))                             await putBlock(blockId, `Customer / 客户：${pl.customer ?? ''}`);
-    else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) await putBlock(blockId, `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
   }
 }
 
