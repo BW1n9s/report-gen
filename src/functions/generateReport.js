@@ -234,6 +234,9 @@ export async function generateReportAsLarkDoc(session, env) {
     }
   }
 
+  // Brief pause so the freshly-copied document is ready for block reads/writes.
+  await new Promise(r => setTimeout(r, 2000));
+
   const { fillReportIntoDoc } = await import('../services/lark.js');
   await fillReportIntoDoc(newFile.token, doItems, session, env);
   console.log('[doc] fill done');

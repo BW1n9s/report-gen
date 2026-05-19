@@ -263,6 +263,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       const text = await res.text();
       if (!text.trim()) break;
       const data = JSON.parse(text);
+      if (data.code !== 0) {
+        throw new Error(`[fillReport] getAllBlocks API error ${data.code}: ${data.msg ?? text.slice(0, 300)}`);
+      }
       blocks.push(...(data.data?.items ?? []));
       pageToken = data.data?.has_more ? data.data.page_token : null;
     } while (pageToken);
@@ -276,6 +279,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     return (block.text?.elements ?? []).map(e => e.text_run?.content ?? '').join('');
   }
 
+  let _firstPatch = true;
   async function patchBlock(blockId, body) {
     const res = await fetch(
       `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${blockId}`,
@@ -286,10 +290,14 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       },
     );
     const text = await res.text();
+    if (_firstPatch) {
+      _firstPatch = false;
+      console.log('[fillReport] first patchBlock blockId:', blockId, 'body:', JSON.stringify(body).slice(0, 200), 'response:', text.slice(0, 300));
+    }
     if (text.trim()) {
       try {
         const data = JSON.parse(text);
-        if (data.code !== 0) console.error('[fillReport] patchBlock error:', text.slice(0, 200));
+        if (data.code !== 0) console.error('[fillReport] patchBlock error blockId:', blockId, ':', text.slice(0, 300));
       } catch (_) {}
     }
   }
