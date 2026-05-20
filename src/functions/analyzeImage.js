@@ -169,15 +169,21 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
       if (parts.length > 0) vehicleContext = parts.join('\n');
     }
 
-    // Stagger concurrent requests to avoid Claude rate limits
-    await new Promise(r => setTimeout(r, Math.random() * 1500));
-
     const result = await analyzeImageWithClaude(imageData, env, 25000, vehicleContext);
 
     // ── Handwritten PDI form ─────────────────────────────────────────────────
     if (result.check_id === 'handwritten_pdi') {
       await handleHandwrittenPdi(imageKey, messageId, imageData, session, userId, env);
       return;
+    }
+
+    // ── Hour meter handling ──────────────────────────────────────────────────
+    if (result.check_id === 'hour_meter' && result.reading) {
+      if (!session.vehicle) session.vehicle = {};
+      if (!session.vehicle.hours) {
+        session.vehicle.hours = result.reading;
+        await updateSession(userId, session, env);
+      }
     }
 
     // ── Picking list handling ────────────────────────────────────────────────
@@ -274,7 +280,7 @@ export async function analyzeImage(imageKey, messageId, session, userId, env) {
 
     // covered_checks
     const checkId = result.check_id;
-    if (checkId && !['nameplate', 'picking_list', 'general'].includes(checkId)
+    if (checkId && !['nameplate', 'picking_list', 'hour_meter', 'general'].includes(checkId)
         && !session.covered_checks.includes(checkId)) {
       session.covered_checks.push(checkId);
       await updateSession(userId, session, env);

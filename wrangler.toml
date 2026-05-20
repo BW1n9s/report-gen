@@ -31,7 +31,10 @@ tag                = "v1"
 new_sqlite_classes = ["ImageDedupDO"]
 
 [vars]
-LARK_API_URL             = "https://open.larksuite.com/open-apis"
-CLAUDE_MODEL             = "claude-sonnet-4-6"
-FORKLIFT_PDI_DOC_TOKEN   = "ZkRddzfyAo4jPBx0KLUlv21Bg0e"
-LOADER_PDI_DOC_TOKEN     = "F7ZKd4tXnoLS4YxZBrLlLjPcgfb"
+LARK_API_URL               = "https://open.larksuite.com/open-apis"
+CLAUDE_MODEL               = "claude-sonnet-4-6"
+FORKLIFT_PDI_WIKI_TOKEN    = "Z4uiwpKlGiGnuZkkqcmlHICPgBc"
+LOADER_PDI_WIKI_TOKEN      = "VknCwOwZRirMP8kPjmbllGPzgrd"
+# Legacy doc tokens kept as fallback if wiki tokens are unavailable
+FORKLIFT_PDI_DOC_TOKEN     = "ZkRddzfyAo4jPBx0KLUlv21Bg0e"
+LOADER_PDI_DOC_TOKEN       = "F7ZKd4tXnoLS4YxZBrLlLjPcgfb"
