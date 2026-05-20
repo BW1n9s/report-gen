@@ -2,6 +2,7 @@ import { getTemplate } from '../templates/index.js';
 import {
   copyDocumentToRoot,
   getDocumentUrl,
+  getWikiNodeObjToken,
 } from '../services/lark.js';
 
 const STATUS_ICON = {
@@ -207,9 +208,26 @@ export async function generateReportAsLarkDoc(session, env) {
 
   if (reportType !== 'PDI') return null;
 
-  const docToken = vehicleType === 'WHEEL_LOADER'
-    ? env.LOADER_PDI_DOC_TOKEN
-    : env.FORKLIFT_PDI_DOC_TOKEN;
+  // Prefer wiki tokens (new table-based templates); fall back to direct doc tokens.
+  const wikiToken = vehicleType === 'WHEEL_LOADER'
+    ? env.LOADER_PDI_WIKI_TOKEN
+    : env.FORKLIFT_PDI_WIKI_TOKEN;
+
+  let docToken;
+  if (wikiToken) {
+    try {
+      docToken = await getWikiNodeObjToken(wikiToken, env);
+    } catch (e) {
+      console.warn('[doc] wiki token resolution failed, falling back to doc token:', e.message);
+      docToken = vehicleType === 'WHEEL_LOADER'
+        ? env.LOADER_PDI_DOC_TOKEN
+        : env.FORKLIFT_PDI_DOC_TOKEN;
+    }
+  } else {
+    docToken = vehicleType === 'WHEEL_LOADER'
+      ? env.LOADER_PDI_DOC_TOKEN
+      : env.FORKLIFT_PDI_DOC_TOKEN;
+  }
 
   if (!docToken) return null;
 

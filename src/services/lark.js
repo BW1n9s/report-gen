@@ -423,6 +423,196 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   }
   console.log('[fillReport] sectionMap keys:', Object.keys(sectionMap));
 
+  // ── Table-format detection & filling ────────────────────────────────────────
+  // New templates use a 3-column table: OK | NG | Items/检查项目
+  // Each data row is one inspection item; we tick OK or NG and strikethrough the
+  // description half of the cell text when an item passes.
+
+  const tableBlockIds = rootChildren.filter(id => blockMap[id]?.block_type === 31);
+  const isTableFormat  = tableBlockIds.length > 0;
+
+  if (isTableFormat) {
+    console.log('[fillReport] table format detected, tables:', tableBlockIds.length);
+
+    // Build flat catalog of every sub-item from both PDI templates so we can
+    // match table row text → sub-item ID → DO item.
+    const { template: fklTmpl } = await import('../templates/pd_forklift.js');
+    const { template: ldrTmpl } = await import('../templates/pd_loader.js');
+    const catalogFlat = [];
+    for (const tmpl of [fklTmpl, ldrTmpl]) {
+      for (const sec of tmpl.sections) {
+        if (!Array.isArray(sec.items)) continue;
+        for (const it of sec.items) {
+          // Tokenise the label — split on "/" "," spaces, keep tokens ≥ 2 chars
+          const tokens = it.label
+            .replace(/[\/,，、]/g, ' ')
+            .split(/\s+/)
+            .map(t => t.trim().toLowerCase())
+            .filter(t => t.length >= 2);
+          catalogFlat.push({ itemId: it.id, sectionId: sec.id, tokens });
+        }
+      }
+    }
+
+    // Index DO items by sub-item ID (handwritten) and section ID (image)
+    const hwByItemId  = {};   // itemId  → best handwritten DO item
+    const imgBySecId  = {};   // sectionId → best image DO item
+    for (const it of items) {
+      if (it.type === 'handwritten' && it.check_id && !hwByItemId[it.check_id])
+        hwByItemId[it.check_id] = it;
+      else if (it.type === 'image' && it.check_id) {
+        const prev = imgBySecId[it.check_id];
+        if (!prev || (it.status !== 'pending' && prev.status === 'pending'))
+          imgBySecId[it.check_id] = it;
+      }
+    }
+
+    function matchRowText(text) {
+      const low = text.toLowerCase().replace(/[：:].*/gs, '').trim();
+      let best = null, bestScore = 0;
+      for (const entry of catalogFlat) {
+        let score = 0;
+        for (const tok of entry.tokens) { if (low.includes(tok)) score++; }
+        if (score > bestScore) { bestScore = score; best = entry; }
+      }
+      return bestScore >= 1 ? best : null;
+    }
+
+    function getDoItemForEntry(entry) {
+      return hwByItemId[entry.itemId] ?? imgBySecId[entry.sectionId] ?? null;
+    }
+
+    async function getCellText(cellId) {
+      const cell = blockMap[cellId];
+      if (!cell) return '';
+      return (cell.children ?? []).map(cid => getBlockText(blockMap[cid] ?? {})).join(' ').trim();
+    }
+
+    async function tickCellCheckbox(cellId, done) {
+      const cell = blockMap[cellId];
+      if (!cell) return;
+      for (const cid of (cell.children ?? [])) {
+        const cb = blockMap[cid];
+        if (!cb) continue;
+        if (cb.block_type === 17) {
+          await putTodoBlock(cid, done);
+          return;
+        }
+        if (cb.block_type === 2) {
+          // Text-based checkbox cell — replace content with ☑ or □
+          await patchBlock(cid, { update_text_elements: { elements: [{ text_run: { content: done ? '☑' : '□' } }] } });
+          return;
+        }
+      }
+    }
+
+    async function strikethroughItemCell(cellId) {
+      const cell = blockMap[cellId];
+      if (!cell) return;
+      for (const cid of (cell.children ?? [])) {
+        const cb = blockMap[cid];
+        if (!cb || cb.block_type !== 2) continue;
+        const text = getBlockText(cb);
+        if (!text.trim()) continue;
+        // Strikethrough only the description half (after ： or :), keep the name plain
+        const sep = Math.max(text.indexOf('：'), text.indexOf(':'));
+        if (sep > 0) {
+          await patchBlock(cid, {
+            update_text_elements: {
+              elements: [
+                { text_run: { content: text.substring(0, sep + 1) } },
+                { text_run: { content: text.substring(sep + 1), text_element_style: { strikethrough: true } } },
+              ],
+            },
+          });
+        } else {
+          await putTextBlockStyled(cid, text, true);
+        }
+        break; // one text block per cell is enough
+      }
+    }
+
+    // Process every table in the document
+    for (const tableId of tableBlockIds) {
+      const tbl     = blockMap[tableId];
+      const colSize = tbl.table?.property?.column_size ?? 3;
+      const rowSize = tbl.table?.property?.row_size    ?? Math.ceil((tbl.children?.length ?? 0) / colSize);
+      const cells   = tbl.children ?? [];
+
+      if (cells.length < colSize) continue; // skip empty / malformed tables
+
+      // Determine column roles from header row
+      let okCol = 0, ngCol = 1, itemCol = 2;
+      for (let c = 0; c < colSize; c++) {
+        const hdr = (await getCellText(cells[c])).toLowerCase().trim();
+        if (hdr === 'ok')                                           okCol   = c;
+        else if (hdr === 'ng')                                      ngCol   = c;
+        else if (hdr.includes('item') || hdr.includes('检查') || c === colSize - 1) itemCol = c;
+      }
+      console.log('[fillReport] table', tableId, 'cols: ok=', okCol, 'ng=', ngCol, 'item=', itemCol, 'rows=', rowSize);
+
+      // Process data rows (skip row 0 = header)
+      for (let r = 1; r < rowSize; r++) {
+        const itemCellId = cells[r * colSize + itemCol];
+        if (!itemCellId) continue;
+        const rowText = await getCellText(itemCellId);
+        if (!rowText.trim()) continue;
+
+        const entry  = matchRowText(rowText);
+        if (!entry) { console.log('[fillReport] no catalog match for row', r, ':', rowText.slice(0, 60)); continue; }
+
+        const doItem = getDoItemForEntry(entry);
+        if (!doItem) continue;
+
+        const okCellId = cells[r * colSize + okCol];
+        const ngCellId = cells[r * colSize + ngCol];
+
+        console.log('[fillReport] row', r, entry.itemId, '→', doItem.status);
+        if (doItem.status === 'ok' || doItem.status === 'corrected') {
+          await tickCellCheckbox(okCellId, true);
+          await strikethroughItemCell(itemCellId);
+        } else if (doItem.status === 'ng') {
+          await tickCellCheckbox(ngCellId, true);
+        } else if (doItem.status === 'n/a' || doItem.status === 'na') {
+          // N/A: strikethrough entire cell text
+          await strikethroughItemCell(itemCellId);
+        }
+      }
+    }
+
+    // Photos in table format: insert image blocks after the last table
+    const lastTableIdx = Math.max(...tableBlockIds.map(id => rootChildren.indexOf(id)));
+    if (lastTableIdx !== -1) {
+      let appendOffset = lastTableIdx + 1;
+      for (const it of items) {
+        if (it.type !== 'image' || !it.imageKey || !it.originalMsgId) continue;
+        try {
+          const imgData   = await downloadImage(it.originalMsgId, it.imageKey, token, env);
+          const fileToken = await uploadImageToLark(imgData.base64, imgData.mediaType, token, env, documentId);
+          const res = await fetch(
+            `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${contentParentId}/children`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ children: [{ block_type: 27, image: { token: fileToken } }], index: appendOffset }),
+            },
+          );
+          const data = await res.json();
+          if (data.code === 0) {
+            appendOffset++;
+            console.log('[fillReport] table-format photo appended at', appendOffset - 1, 'for', it.check_id);
+          } else {
+            console.error('[fillReport] table photo insert failed:', JSON.stringify(data).slice(0, 200));
+          }
+        } catch (e) {
+          console.error('[fillReport] table photo error:', it.check_id, e.message);
+        }
+      }
+    }
+  }
+  // End of table-format path — fall through to basic_info filling below
+  // (basic_info text blocks exist in both formats)
+
   function findCheckboxBlock(checkboxBlocks, label) {
     const parts = label.split('/').map(p => p.trim().toLowerCase()).filter(p => p.length > 3);
     for (const cb of checkboxBlocks) {
@@ -431,6 +621,10 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
     return null;
   }
+
+  // ── Heading-based filling (skip when the template uses tables) ──────────────
+
+  if (!isTableFormat) {
 
   // ── Process handwritten sub-items (all statuses) ──────────────────────────
 
@@ -542,7 +736,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
   }
 
-  // ── Fill basic_info fields (record indices for photo insertion later) ─────
+  } // end if (!isTableFormat) — heading-based inspection filling
+
+  // ── Fill basic_info fields (applies to both table and heading formats) ───────
 
   const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
 
@@ -734,7 +930,10 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     console.log('[fillReport] deleted', deletedSet.size, 'option blocks');
   }
 
-  // ── Photo insertions (PDI placeholders + nameplate + hour_meter) ──────────
+  // ── Heading-format photo insertions (skip for table format — handled above) ──
+
+  if (!isTableFormat) {
+
   // Adjust original rootChildren indices for any blocks deleted above, then
   // insert from top to bottom with a running offset.
 
@@ -817,6 +1016,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       console.error('[fillReport] photo insert error:', item.check_id, e.message);
     }
   }
+
+  } // end if (!isTableFormat) — heading-format photo insertions
 }
 
 export async function updateTextMessage(messageId, text, env) {
