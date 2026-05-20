@@ -809,6 +809,9 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
   // ── Heading-based filling (skip when the template uses tables) ──────────────
 
+  // Declared here so both if (!isTableFormat) blocks share the same array.
+  const photoInsertTasks = [];
+
   if (!isTableFormat) {
 
   // ── Process handwritten sub-items (all statuses) ──────────────────────────
@@ -872,8 +875,6 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   // 1. Update result/notes text blocks.
   // 2. Collect photo insertion tasks (download + upload + insert image block).
   //    Execute insertions in rootIdx order with a running offset so indices stay correct.
-
-  const photoInsertTasks = [];
 
   for (const item of items) {
     if (item.type !== 'image') continue;
