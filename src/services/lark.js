@@ -428,13 +428,31 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   // Each data row is one inspection item; we tick OK or NG and strikethrough the
   // description half of the cell text when an item passes.
 
-  const tableBlockIds = rootChildren.filter(id => blockMap[id]?.block_type === 31);
-  const isTableFormat  = tableBlockIds.length > 0;
-
   // Diagnostic: log block type distribution in rootChildren
   const typeCount = {};
   for (const id of rootChildren) { const t = blockMap[id]?.block_type ?? 'null'; typeCount[t] = (typeCount[t] ?? 0) + 1; }
+
+  // Type-30 = Lark table (confirmed from live template diagnostics); type-31 was wrong assumption
+  const tableBlockIds = rootChildren.filter(id => blockMap[id]?.block_type === 30);
+  const isTableFormat  = tableBlockIds.length > 0;
+
   console.log('[fillReport] isTableFormat:', isTableFormat, 'rootChildren types:', JSON.stringify(typeCount), 'items count:', items.length);
+
+  // Log raw structure of first type-30 and type-22 block for diagnosis
+  for (const id of rootChildren) {
+    const b = blockMap[id];
+    if (b?.block_type === 30) {
+      console.log('[fillReport] first type-30 block:', JSON.stringify(b).slice(0, 800));
+      break;
+    }
+  }
+  for (const id of rootChildren) {
+    const b = blockMap[id];
+    if (b?.block_type === 22) {
+      console.log('[fillReport] first type-22 block:', JSON.stringify(b).slice(0, 500));
+      break;
+    }
+  }
 
   if (isTableFormat) {
     console.log('[fillReport] table format detected, tables:', tableBlockIds.length);
@@ -473,7 +491,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           const text = getHeadingText(b);
           if (text) return { text, idx: i };
         }
-        if (b.block_type === 31) break; // hit another table — stop
+        if (b.block_type === 30) break; // hit another table — stop
       }
       return null;
     }
