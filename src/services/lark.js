@@ -431,6 +431,11 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   const tableBlockIds = rootChildren.filter(id => blockMap[id]?.block_type === 31);
   const isTableFormat  = tableBlockIds.length > 0;
 
+  // Diagnostic: log block type distribution in rootChildren
+  const typeCount = {};
+  for (const id of rootChildren) { const t = blockMap[id]?.block_type ?? 'null'; typeCount[t] = (typeCount[t] ?? 0) + 1; }
+  console.log('[fillReport] isTableFormat:', isTableFormat, 'rootChildren types:', JSON.stringify(typeCount), 'items count:', items.length);
+
   if (isTableFormat) {
     console.log('[fillReport] table format detected, tables:', tableBlockIds.length);
 
@@ -488,6 +493,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         if (!doItemBySection[sid]) doItemBySection[sid] = it;
       }
     }
+    console.log('[fillReport] doItemBySection keys:', Object.keys(doItemBySection));
 
     // ── Table cell helpers ─────────────────────────────────────────────────
 
