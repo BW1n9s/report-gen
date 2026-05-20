@@ -434,53 +434,62 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   if (isTableFormat) {
     console.log('[fillReport] table format detected, tables:', tableBlockIds.length);
 
-    // Build flat catalog of every sub-item from both PDI templates so we can
-    // match table row text → sub-item ID → DO item.
-    const { template: fklTmpl } = await import('../templates/pd_forklift.js');
-    const { template: ldrTmpl } = await import('../templates/pd_loader.js');
-    const catalogFlat = [];
-    for (const tmpl of [fklTmpl, ldrTmpl]) {
-      for (const sec of tmpl.sections) {
-        if (!Array.isArray(sec.items)) continue;
-        for (const it of sec.items) {
-          // Tokenise the label — split on "/" "," spaces, keep tokens ≥ 2 chars
-          const tokens = it.label
-            .replace(/[\/,，、]/g, ' ')
-            .split(/\s+/)
-            .map(t => t.trim().toLowerCase())
-            .filter(t => t.length >= 2);
-          catalogFlat.push({ itemId: it.id, sectionId: sec.id, tokens });
+    // ── Section heading → check_id mapping ────────────────────────────────
+    const SECTION_PATTERNS = [
+      { checkId: 'basic_info',             kws: ['Basic Info', '基本信息'] },
+      { checkId: 'attachment_accessories', kws: ['Attachment', '附件'] },
+      { checkId: 'visual_structure',       kws: ['Visual', 'Structure', '外观'] },
+      { checkId: 'fluid_levels',           kws: ['Fluid', '油液'] },
+      { checkId: 'engine_mechanical',      kws: ['Engine', '发动机'] },
+      { checkId: 'electrical_system',      kws: ['Electrical', '电气'] },
+      { checkId: 'hydraulic_system',       kws: ['Hydraulic', '液压'] },
+      { checkId: 'mast_fork_chain',        kws: ['Mast', '门架'] },
+      { checkId: 'loader_arm_axle',        kws: ['Loader', '大臂', '车桥'] },
+      { checkId: 'steering_brake_dynamic', kws: ['Steering', '转向'] },
+      { checkId: 'tyre_wheel',             kws: ['Tyre', 'Tire', '轮胎'] },
+      { checkId: 'safety_functions',       kws: ['Safety', '安全'] },
+      { checkId: 'maintenance_work',       kws: ['Maintenance', '保养'] },
+      { checkId: 'final_result',           kws: ['Final', '最终'] },
+    ];
+
+    function headingTextToCheckId(text) {
+      const t = text.toLowerCase();
+      for (const p of SECTION_PATTERNS) {
+        if (p.kws.some(k => t.includes(k.toLowerCase()))) return p.checkId;
+      }
+      return null;
+    }
+
+    function findHeadingBeforeTable(tblRootIdx) {
+      for (let i = tblRootIdx - 1; i >= 0; i--) {
+        const b = blockMap[rootChildren[i]];
+        if (!b) continue;
+        if (b.block_type >= 3 && b.block_type <= 11) {
+          const text = getHeadingText(b);
+          if (text) return { text, idx: i };
         }
+        if (b.block_type === 31) break; // hit another table — stop
       }
+      return null;
     }
 
-    // Index DO items by sub-item ID (handwritten) and section ID (image)
-    const hwByItemId  = {};   // itemId  → best handwritten DO item
-    const imgBySecId  = {};   // sectionId → best image DO item
+    // ── Index DO items by section ──────────────────────────────────────────
+    const doItemBySection = {};
     for (const it of items) {
-      if (it.type === 'handwritten' && it.check_id && !hwByItemId[it.check_id])
-        hwByItemId[it.check_id] = it;
-      else if (it.type === 'image' && it.check_id) {
-        const prev = imgBySecId[it.check_id];
+      if (it.type === 'image' && it.check_id) {
+        const prev = doItemBySection[it.check_id];
         if (!prev || (it.status !== 'pending' && prev.status === 'pending'))
-          imgBySecId[it.check_id] = it;
+          doItemBySection[it.check_id] = it;
+      }
+    }
+    for (const it of items) {
+      if (it.type === 'handwritten' && it.check_id) {
+        const sid = ITEM_SECTION_MAP[it.check_id] ?? it.check_id;
+        if (!doItemBySection[sid]) doItemBySection[sid] = it;
       }
     }
 
-    function matchRowText(text) {
-      const low = text.toLowerCase().replace(/[：:].*/gs, '').trim();
-      let best = null, bestScore = 0;
-      for (const entry of catalogFlat) {
-        let score = 0;
-        for (const tok of entry.tokens) { if (low.includes(tok)) score++; }
-        if (score > bestScore) { bestScore = score; best = entry; }
-      }
-      return bestScore >= 1 ? best : null;
-    }
-
-    function getDoItemForEntry(entry) {
-      return hwByItemId[entry.itemId] ?? imgBySecId[entry.sectionId] ?? null;
-    }
+    // ── Table cell helpers ─────────────────────────────────────────────────
 
     async function getCellText(cellId) {
       const cell = blockMap[cellId];
@@ -488,25 +497,21 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       return (cell.children ?? []).map(cid => getBlockText(blockMap[cid] ?? {})).join(' ').trim();
     }
 
-    async function tickCellCheckbox(cellId, done) {
+    async function tickCell(cellId, done) {
       const cell = blockMap[cellId];
       if (!cell) return;
       for (const cid of (cell.children ?? [])) {
         const cb = blockMap[cid];
         if (!cb) continue;
-        if (cb.block_type === 17) {
-          await putTodoBlock(cid, done);
-          return;
-        }
+        if (cb.block_type === 17) { await putTodoBlock(cid, done); return; }
         if (cb.block_type === 2) {
-          // Text-based checkbox cell — replace content with ☑ or □
           await patchBlock(cid, { update_text_elements: { elements: [{ text_run: { content: done ? '☑' : '□' } }] } });
           return;
         }
       }
     }
 
-    async function strikethroughItemCell(cellId) {
+    async function strikethroughCell(cellId) {
       const cell = blockMap[cellId];
       if (!cell) return;
       for (const cid of (cell.children ?? [])) {
@@ -514,104 +519,284 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         if (!cb || cb.block_type !== 2) continue;
         const text = getBlockText(cb);
         if (!text.trim()) continue;
-        // Strikethrough only the description half (after ： or :), keep the name plain
         const sep = Math.max(text.indexOf('：'), text.indexOf(':'));
         if (sep > 0) {
           await patchBlock(cid, {
-            update_text_elements: {
-              elements: [
-                { text_run: { content: text.substring(0, sep + 1) } },
-                { text_run: { content: text.substring(sep + 1), text_element_style: { strikethrough: true } } },
-              ],
-            },
+            update_text_elements: { elements: [
+              { text_run: { content: text.substring(0, sep + 1) } },
+              { text_run: { content: text.substring(sep + 1), text_element_style: { strikethrough: true } } },
+            ]},
           });
         } else {
           await putTextBlockStyled(cid, text, true);
         }
-        break; // one text block per cell is enough
+        break;
       }
     }
 
-    // Process every table in the document
+    // ── Vehicle type map ───────────────────────────────────────────────────
+    const vehicleTypeForTable = v.type ?? '';
+    const VTYPE_MAP = [
+      { keywords: ['Diesel Forklift', '柴油叉车'],   types: ['FORKLIFT_ICE', 'FORKLIFT_DIESEL'] },
+      { keywords: ['LPG', 'Petrol', '汽油'],          types: ['FORKLIFT_LPG', 'FORKLIFT_PETROL', 'FORKLIFT_GAS'] },
+      { keywords: ['Electric Forklift', '电动叉车'],  types: ['FORKLIFT_ELECTRIC'] },
+      { keywords: ['Order Picker', '拣选'],           types: ['ORDER_PICKER'] },
+      { keywords: ['Reach Truck', '前移'],            types: ['REACH_TRUCK'] },
+      { keywords: ['Wheel Loader', '装载机'],         types: ['WHEEL_LOADER'] },
+      { keywords: ['Walkie', '步行'],                 types: ['FORKLIFT_WALKIE'] },
+    ];
+
+    // Overall NG status (for final result table)
+    const hasAnyNg = items.some(i => i.status === 'ng');
+
+    // Photo tasks: collected here, inserted after all tables are processed
+    const tablePhotoTasks = []; // { item, afterRootIdx }
+
+    // ── Process each table ─────────────────────────────────────────────────
     for (const tableId of tableBlockIds) {
-      const tbl     = blockMap[tableId];
-      const colSize = tbl.table?.property?.column_size ?? 3;
-      const rowSize = tbl.table?.property?.row_size    ?? Math.ceil((tbl.children?.length ?? 0) / colSize);
+      const tblRootIdx = rootChildren.indexOf(tableId);
+      const tbl = blockMap[tableId];
+      if (!tbl) continue;
+
+      const colSize = tbl.table?.property?.column_size ?? 2;
+      const rowSize = tbl.table?.property?.row_size ?? Math.ceil((tbl.children?.length ?? 0) / colSize);
       const cells   = tbl.children ?? [];
+      if (cells.length < colSize) continue;
 
-      if (cells.length < colSize) continue; // skip empty / malformed tables
+      // Section check_id from heading above this table
+      const hdg     = findHeadingBeforeTable(tblRootIdx);
+      const checkId = hdg ? headingTextToCheckId(hdg.text) : null;
+      console.log('[fillReport] table', tableId, 'checkId=', checkId, 'hdg=', hdg?.text?.slice(0, 40));
 
-      // Determine column roles from header row
-      let okCol = 0, ngCol = 1, itemCol = 2;
+      // Table type from header row
+      const hdrTexts = [];
+      for (let c = 0; c < colSize; c++) hdrTexts.push((await getCellText(cells[c])).trim());
+      const hdrJoined = hdrTexts.join('|').toLowerCase();
+
+      let tableType = 'unknown';
+      if      (hdrJoined.includes('ok') && hdrJoined.includes('ng')) tableType = 'inspection';
+      else if (hdrJoined.includes('done'))                            tableType = 'maintenance';
+      else if (hdrJoined.includes('result') || hdrJoined.includes('结果')) tableType = 'final_result';
+      else if (hdrJoined.includes('detail') || hdrJoined.includes('内容'))  tableType = 'basic_info';
+      console.log('[fillReport] tableType=', tableType, 'headers=', hdrTexts);
+
+      // Column indices
+      let okCol = -1, ngCol = -1, itemCol = -1, doneCol = -1, detailCol = -1, resultCol = -1;
       for (let c = 0; c < colSize; c++) {
-        const hdr = (await getCellText(cells[c])).toLowerCase().trim();
-        if (hdr === 'ok')                                           okCol   = c;
-        else if (hdr === 'ng')                                      ngCol   = c;
-        else if (hdr.includes('item') || hdr.includes('检查') || c === colSize - 1) itemCol = c;
+        const h = hdrTexts[c].toLowerCase();
+        if      (h === 'ok')                                                   okCol     = c;
+        else if (h === 'ng')                                                   ngCol     = c;
+        else if (h.startsWith('done'))                                         doneCol   = c;
+        else if (h.includes('detail') || h.includes('内容'))                  detailCol = c;
+        else if (h.includes('result') || h.includes('结果'))                  resultCol = c;
+        else if (h.includes('item') || h.includes('检查') || h.includes('项目')) itemCol = c;
       }
-      console.log('[fillReport] table', tableId, 'cols: ok=', okCol, 'ng=', ngCol, 'item=', itemCol, 'rows=', rowSize);
 
-      // Process data rows (skip row 0 = header)
-      for (let r = 1; r < rowSize; r++) {
-        const itemCellId = cells[r * colSize + itemCol];
-        if (!itemCellId) continue;
-        const rowText = await getCellText(itemCellId);
-        if (!rowText.trim()) continue;
+      // ── Inspection table: OK | NG | Items ─────────────────────────────────
+      if (tableType === 'inspection') {
+        if (okCol   === -1) okCol   = 0;
+        if (ngCol   === -1) ngCol   = 1;
+        if (itemCol === -1) itemCol = 2;
+        const doItem = checkId ? (doItemBySection[checkId] ?? null) : null;
 
-        const entry  = matchRowText(rowText);
-        if (!entry) { console.log('[fillReport] no catalog match for row', r, ':', rowText.slice(0, 60)); continue; }
-
-        const doItem = getDoItemForEntry(entry);
-        if (!doItem) continue;
-
-        const okCellId = cells[r * colSize + okCol];
-        const ngCellId = cells[r * colSize + ngCol];
-
-        console.log('[fillReport] row', r, entry.itemId, '→', doItem.status);
-        if (doItem.status === 'ok' || doItem.status === 'corrected') {
-          await tickCellCheckbox(okCellId, true);
-          await strikethroughItemCell(itemCellId);
-        } else if (doItem.status === 'ng') {
-          await tickCellCheckbox(ngCellId, true);
-        } else if (doItem.status === 'n/a' || doItem.status === 'na') {
-          // N/A: strikethrough entire cell text
-          await strikethroughItemCell(itemCellId);
-        }
-      }
-    }
-
-    // Photos in table format: insert image blocks after the last table
-    const lastTableIdx = Math.max(...tableBlockIds.map(id => rootChildren.indexOf(id)));
-    if (lastTableIdx !== -1) {
-      let appendOffset = lastTableIdx + 1;
-      for (const it of items) {
-        if (it.type !== 'image' || !it.imageKey || !it.originalMsgId) continue;
-        try {
-          const imgData   = await downloadImage(it.originalMsgId, it.imageKey, token, env);
-          const fileToken = await uploadImageToLark(imgData.base64, imgData.mediaType, token, env, documentId);
-          const res = await fetch(
-            `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${contentParentId}/children`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-              body: JSON.stringify({ children: [{ block_type: 27, image: { token: fileToken } }], index: appendOffset }),
-            },
-          );
-          const data = await res.json();
-          if (data.code === 0) {
-            appendOffset++;
-            console.log('[fillReport] table-format photo appended at', appendOffset - 1, 'for', it.check_id);
-          } else {
-            console.error('[fillReport] table photo insert failed:', JSON.stringify(data).slice(0, 200));
+        for (let r = 1; r < rowSize; r++) {
+          const base = r * colSize;
+          if (base + Math.max(okCol, ngCol, itemCol) >= cells.length) break;
+          if (!doItem) continue;
+          const okCellId   = cells[base + okCol];
+          const ngCellId   = cells[base + ngCol];
+          const itemCellId = cells[base + itemCol];
+          if (doItem.status === 'ok' || doItem.status === 'corrected') {
+            await tickCell(okCellId, true);
+            await strikethroughCell(itemCellId);
+          } else if (doItem.status === 'ng') {
+            await tickCell(ngCellId, true);
+          } else if (doItem.status === 'n/a' || doItem.status === 'na') {
+            await strikethroughCell(itemCellId);
           }
-        } catch (e) {
-          console.error('[fillReport] table photo error:', it.check_id, e.message);
         }
       }
+
+      // ── Basic info table: Item | Details ──────────────────────────────────
+      else if (tableType === 'basic_info') {
+        if (itemCol   === -1) itemCol   = 0;
+        if (detailCol === -1) detailCol = 1;
+
+        const nowDate      = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
+        const vinMis       = pl.vin && v.serial && v.serialSource !== 'PICKING_LIST' &&
+          pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
+        const serialSuffix = vinMis ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
+
+        for (let r = 1; r < rowSize; r++) {
+          const base       = r * colSize;
+          if (base + detailCol >= cells.length) break;
+          const rowLabel   = (await getCellText(cells[base + itemCol])).toLowerCase();
+          const detailCell = blockMap[cells[base + detailCol]];
+          if (!detailCell) continue;
+          const childIds   = detailCell.children ?? [];
+
+          const fillDetail = async (val) => { if (childIds[0]) await putBlock(childIds[0], val); };
+
+          if      (rowLabel.includes('customer') || rowLabel.includes('客户')) {
+            await fillDetail(pl.customer ?? '');
+          } else if (rowLabel.includes('invoice') || rowLabel.includes('order') || rowLabel.includes('发票') || rowLabel.includes('订单')) {
+            await fillDetail(pl.invoiceNumber ?? '');
+          } else if (rowLabel.includes('model') || rowLabel.includes('型号')) {
+            await fillDetail(v.model ?? '');
+          } else if (rowLabel.includes('serial') || rowLabel.includes('vin') || rowLabel.includes('车架')) {
+            await fillDetail(`${effectiveSerial}${serialSuffix}`);
+          } else if (rowLabel.includes('hour') || rowLabel.includes('小时')) {
+            await fillDetail(v.hours ? `${v.hours}h` : '');
+          } else if (rowLabel.includes('date') || rowLabel.includes('日期')) {
+            await fillDetail(nowDate);
+          } else if (rowLabel.includes('type') || rowLabel.includes('类型')) {
+            // Vehicle type — tick the matching inline checkbox option
+            const matchedEntry = VTYPE_MAP.find(o => o.types.includes(vehicleTypeForTable));
+            if (matchedEntry) {
+              const todoKids = childIds.map(cid => blockMap[cid]).filter(b => b?.block_type === 17);
+              const textKids = childIds.map(cid => blockMap[cid]).filter(b => b?.block_type === 2);
+
+              if (todoKids.length > 0) {
+                // One todo block per option
+                for (const tb of todoKids) {
+                  if (matchedEntry.keywords.some(kw => getBlockText(tb).includes(kw)))
+                    await putTodoBlock(tb.block_id, true);
+                }
+              } else if (textKids.length === 1) {
+                // All options in a single text block with ☐ markers
+                const tb       = textKids[0];
+                const fullText = getBlockText(tb);
+                let newText    = fullText;
+                for (const kw of matchedEntry.keywords) {
+                  const re = new RegExp('☐([^☐]*?' + kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')');
+                  if (re.test(newText)) { newText = newText.replace(re, '☑$1'); break; }
+                }
+                if (newText !== fullText) await putBlock(tb.block_id, newText);
+              } else {
+                // One text block per option
+                for (const tb of textKids) {
+                  const tbText = getBlockText(tb);
+                  if (tbText.includes('☐') && matchedEntry.keywords.some(kw => tbText.includes(kw))) {
+                    await putBlock(tb.block_id, tbText.replace('☐', '☑'));
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // ── Maintenance table: Done | Items ────────────────────────────────────
+      else if (tableType === 'maintenance') {
+        if (doneCol === -1) doneCol = 0;
+        if (itemCol === -1) itemCol = 1;
+        const doItem = checkId ? (doItemBySection[checkId] ?? null) : null;
+        if (doItem && (doItem.status === 'ok' || doItem.status === 'corrected')) {
+          for (let r = 1; r < rowSize; r++) {
+            const base = r * colSize;
+            if (base + doneCol >= cells.length) break;
+            await tickCell(cells[base + doneCol], true);
+          }
+        }
+      }
+
+      // ── Final result table: Item | Result ──────────────────────────────────
+      else if (tableType === 'final_result') {
+        if (itemCol   === -1) itemCol   = 0;
+        if (resultCol === -1) resultCol = 1;
+
+        for (let r = 1; r < rowSize; r++) {
+          const base       = r * colSize;
+          if (base + resultCol >= cells.length) break;
+          const resultCell = blockMap[cells[base + resultCol]];
+          if (!resultCell) continue;
+
+          for (const cid of (resultCell.children ?? [])) {
+            const cb = blockMap[cid];
+            if (!cb || cb.block_type !== 2) continue;
+            const text = getBlockText(cb);
+            if (!text.includes('☐') && !text.includes('☑')) continue;
+
+            let newText = text;
+            if (!hasAnyNg) {
+              // Tick Yes, clear No
+              newText = newText
+                .replace(/☐(\s*(?:Yes|是))/g, '☑$1')
+                .replace(/☑(\s*(?:No|否))/g,  '☐$1')
+                .replace(/(Yes|是)(\s*)☐/g,    '$1$2☑')
+                .replace(/(No|否)(\s*)☑/g,     '$1$2☐');
+            } else {
+              // Tick No, clear Yes
+              newText = newText
+                .replace(/☐(\s*(?:No|否))/g,  '☑$1')
+                .replace(/☑(\s*(?:Yes|是))/g, '☐$1')
+                .replace(/(No|否)(\s*)☐/g,    '$1$2☑')
+                .replace(/(Yes|是)(\s*)☑/g,   '$1$2☐');
+            }
+            if (newText !== text) await putBlock(cid, newText);
+            break;
+          }
+        }
+      }
+
+      // ── Remarks and Photos blocks between this table and the next ──────────
+      const nextTblRootIdx = tableBlockIds
+        .map(id => rootChildren.indexOf(id))
+        .filter(idx => idx > tblRootIdx)
+        .reduce((min, idx) => Math.min(min, idx), rootChildren.length);
+
+      for (let i = tblRootIdx + 1; i < nextTblRootIdx; i++) {
+        const b = blockMap[rootChildren[i]];
+        if (!b || b.block_type !== 2) continue;
+        const text = getBlockText(b);
+
+        if ((text.includes('Remarks') || text.includes('备注')) && checkId) {
+          const doItem = doItemBySection[checkId];
+          if (doItem?.reading) {
+            const sep   = Math.max(text.lastIndexOf('：'), text.lastIndexOf(':'));
+            const label = sep >= 0 ? text.substring(0, sep + 1) : text + '：';
+            await putBlock(rootChildren[i], label + doItem.reading);
+          }
+        } else if ((text.includes('Photos') || text.includes('照片')) && checkId) {
+          for (const it of items) {
+            if (it.type !== 'image' || !it.imageKey || !it.originalMsgId) continue;
+            if (it.check_id === checkId || (checkId === 'basic_info' && it.check_id === 'nameplate'))
+              tablePhotoTasks.push({ item: it, afterRootIdx: i });
+          }
+        }
+      }
+    } // end for tableId
+
+    // ── Insert photos top-to-bottom with running offset ────────────────────
+    tablePhotoTasks.sort((a, b) => a.afterRootIdx - b.afterRootIdx);
+    let tblPhotoOffset = 0;
+    for (const { item, afterRootIdx } of tablePhotoTasks) {
+      try {
+        const imgData   = await downloadImage(item.originalMsgId, item.imageKey, token, env);
+        const fileToken = await uploadImageToLark(imgData.base64, imgData.mediaType, token, env, documentId);
+        const insertIdx = afterRootIdx + tblPhotoOffset + 1;
+        const res = await fetch(
+          `${env.LARK_API_URL}/docx/v1/documents/${documentId}/blocks/${contentParentId}/children`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ children: [{ block_type: 27, image: { token: fileToken } }], index: insertIdx }),
+          },
+        );
+        const data = await res.json();
+        if (data.code === 0) {
+          tblPhotoOffset++;
+          console.log('[fillReport] table photo inserted for', item.check_id, 'at', insertIdx);
+        } else {
+          console.error('[fillReport] table photo insert failed:', JSON.stringify(data).slice(0, 200));
+        }
+      } catch (e) {
+        console.error('[fillReport] table photo error:', item.check_id, e.message);
+      }
     }
-  }
-  // End of table-format path — fall through to basic_info filling below
-  // (basic_info text blocks exist in both formats)
+
+  } // end isTableFormat
 
   function findCheckboxBlock(checkboxBlocks, label) {
     const parts = label.split('/').map(p => p.trim().toLowerCase()).filter(p => p.length > 3);
@@ -738,36 +923,38 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
 
   } // end if (!isTableFormat) — heading-based inspection filling
 
-  // ── Fill basic_info fields (applies to both table and heading formats) ───────
-
-  const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
-
-  const vinMismatch = pl.vin && v.serial && v.serialSource !== 'PICKING_LIST' &&
-    pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
-  const serialNote = vinMismatch ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
+  // ── Fill basic_info fields — heading/text format only (table format handled above) ──
 
   let serialRootIdx    = -1;
   let hourMeterRootIdx = -1;
 
-  for (let i = 0; i < rootChildren.length; i++) {
-    const block = blockMap[rootChildren[i]];
-    if (!block || block.block_type !== 2) continue;
-    const text = getBlockText(block);
+  if (!isTableFormat) {
+    const now = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }).split(',')[0];
 
-    if (text.includes('Machine Model')) {
-      await putBlock(rootChildren[i], `Machine Model / 设备型号：${v.model ?? ''}`);
-    } else if (text.includes('Serial No.') || text.includes('VIN No.')) {
-      serialRootIdx = i;
-      await putBlock(rootChildren[i], `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
-    } else if (text.includes('Date / 日期')) {
-      await putBlock(rootChildren[i], `Date / 日期：${now}`);
-    } else if (text.includes('Hour Meter')) {
-      hourMeterRootIdx = i;
-      await putBlock(rootChildren[i], `Hour Meter / 小时数：${v.hours ?? ''}`);
-    } else if (text.includes('Customer') || text.includes('客户')) {
-      await putBlock(rootChildren[i], `Customer / 客户：${pl.customer ?? ''}`);
-    } else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) {
-      await putBlock(rootChildren[i], `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
+    const vinMismatch = pl.vin && v.serial && v.serialSource !== 'PICKING_LIST' &&
+      pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
+    const serialNote = vinMismatch ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
+
+    for (let i = 0; i < rootChildren.length; i++) {
+      const block = blockMap[rootChildren[i]];
+      if (!block || block.block_type !== 2) continue;
+      const text = getBlockText(block);
+
+      if (text.includes('Machine Model')) {
+        await putBlock(rootChildren[i], `Machine Model / 设备型号：${v.model ?? ''}`);
+      } else if (text.includes('Serial No.') || text.includes('VIN No.')) {
+        serialRootIdx = i;
+        await putBlock(rootChildren[i], `Serial No. / VIN No. / 车架号：${effectiveSerial}${serialNote}`);
+      } else if (text.includes('Date / 日期')) {
+        await putBlock(rootChildren[i], `Date / 日期：${now}`);
+      } else if (text.includes('Hour Meter')) {
+        hourMeterRootIdx = i;
+        await putBlock(rootChildren[i], `Hour Meter / 小时数：${v.hours ?? ''}`);
+      } else if (text.includes('Customer') || text.includes('客户')) {
+        await putBlock(rootChildren[i], `Customer / 客户：${pl.customer ?? ''}`);
+      } else if (text.includes('Invoice') || text.includes('发票') || text.includes('Order No')) {
+        await putBlock(rootChildren[i], `Invoice No. / 发票号：${pl.invoiceNumber ?? ''}`);
+      }
     }
   }
 
