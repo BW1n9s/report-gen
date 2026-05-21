@@ -504,6 +504,41 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       return { spreadsheetToken: tok.slice(0, i), sheetId: tok.slice(i + 1) };
     }
 
+    // Trim trailing all-empty/null rows so A1:Z60 doesn't yield 60 rows for a 5-row sheet
+    function trimTrailingEmptyRows(rawRows) {
+      let last = rawRows.length - 1;
+      while (last > 0) {
+        const row = rawRows[last];
+        if (row && row.some(c => c !== null && c !== '' && c !== undefined)) break;
+        last--;
+      }
+      return rawRows.slice(0, last + 1);
+    }
+
+    // Match a sheet row's description text to the best handwritten sub-item by keyword overlap.
+    // Returns the matching item or null if no keywords match.
+    function matchRowToItem(rowText, itemsForSection) {
+      if (!rowText || !itemsForSection.length) return null;
+      const rowLower = rowText.toLowerCase();
+      let bestMatch = null;
+      let bestScore = 0;
+      for (const it of itemsForSection) {
+        const entry = HANDWRITTEN_ITEM_CATALOG.find(c => c.id === it.check_id);
+        if (!entry) continue;
+        // Try both halves of "English / 中文" label
+        const parts = entry.label.split('/').map(p => p.trim().toLowerCase());
+        let score = 0;
+        for (const part of parts) {
+          const words = part.split(/[\s,()\/\-]+/).filter(w => w.length > 3);
+          for (const w of words) {
+            if (rowLower.includes(w)) score++;
+          }
+        }
+        if (score > bestScore) { bestScore = score; bestMatch = it; }
+      }
+      return bestScore > 0 ? bestMatch : null;
+    }
+
     // Read a range from an embedded spreadsheet
     async function readSheet(spreadsheetToken, sheetId, range) {
       const encodedRange = encodeURIComponent(`${sheetId}!${range}`);
@@ -584,13 +619,16 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       const { spreadsheetToken, sheetId } = splitSheetToken(rawToken);
       console.log('[fillReport] processing sheet block', tableId, 'ssToken=', spreadsheetToken, 'sheetId=', sheetId);
 
-      // Read up to 60 rows (header + data)
+      // Read up to 60 rows (header + data), then trim API-padded trailing empty rows
       const rawValues = await readSheet(spreadsheetToken, sheetId, 'A1:Z60');
       if (!rawValues || rawValues.length < 2) { console.warn('[fillReport] sheet too short', tableId); continue; }
 
+      const trimmedValues = trimTrailingEmptyRows(rawValues);
+      if (trimmedValues.length < 2) { console.warn('[fillReport] sheet empty after trim', tableId); continue; }
+
       // Pad all rows to the same width
-      const colCount = Math.max(...rawValues.map(r => r?.length ?? 0), 1);
-      const rows = rawValues.map(r => {
+      const colCount = Math.max(...trimmedValues.map(r => r?.length ?? 0), 1);
+      const rows = trimmedValues.map(r => {
         const padded = [...(r ?? [])].map(c => (c == null ? '' : c));
         while (padded.length < colCount) padded.push('');
         return padded;
@@ -621,32 +659,97 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         if (okCol === -1) okCol = 0;
         if (ngCol === -1) ngCol = 1;
 
-        const doItem = checkId ? (doItemBySection[checkId] ?? null) : null;
-        const st = doItem?.status;
-        if (!doItem || st === 'pending') {
-          // No confirmed result for this section → leave sheet untouched
-          console.log('[fillReport] skip inspection checkId=', checkId, 'status=', st ?? 'none');
-        } else if (st === 'ok' || st === 'corrected') {
-          // Write ✓ to OK column, clear NG column — only these two columns
-          const n = numDataRows;
-          await writeSheet(spreadsheetToken, sheetId,
-            `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`, Array(n).fill(null).map(() => ['✓']));
-          await writeSheet(spreadsheetToken, sheetId,
-            `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`, Array(n).fill(null).map(() => ['']));
-          console.log('[fillReport] inspection ok/corrected written, checkId=', checkId);
-        } else if (st === 'ng') {
-          // Write ✓ to NG column, clear OK column
-          const n = numDataRows;
-          await writeSheet(spreadsheetToken, sheetId,
-            `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`, Array(n).fill(null).map(() => ['']));
-          await writeSheet(spreadsheetToken, sheetId,
-            `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`, Array(n).fill(null).map(() => ['✓']));
-          console.log('[fillReport] inspection ng written, checkId=', checkId);
-        } else if (st === 'n/a' || st === 'na') {
-          // Strikethrough all data rows via Sheets styles API
-          await applySheetStyle(spreadsheetToken, sheetId,
-            `A2:${colLetter(colCount - 1)}${endRow}`, { font: { strikeThrough: true } });
-          console.log('[fillReport] inspection n/a strikethrough, checkId=', checkId);
+        // Find the description/items column (not OK or NG)
+        let itemsCol = headerRow.findIndex(
+          (h, i) => i !== okCol && i !== ngCol && (
+            h.includes('item') || h.includes('检查') || h.includes('项目') || h.includes('description') || h.length > 1
+          )
+        );
+        if (itemsCol === -1) itemsCol = headerRow.findIndex((_, i) => i !== okCol && i !== ngCol);
+        if (itemsCol === -1) itemsCol = 2;
+
+        // Handwritten sub-items for this section (individually matched per row)
+        const sectionHandwritten = checkId
+          ? items.filter(it => it.type === 'handwritten' && ITEM_SECTION_MAP[it.check_id] === checkId)
+          : [];
+
+        // Section-level image item (fallback when no handwritten data)
+        const imageItem = checkId ? (doItemBySection[checkId] ?? null) : null;
+        const imageItemConfirmed = imageItem && imageItem.status !== 'pending';
+
+        console.log('[fillReport] inspection checkId=', checkId,
+          'handwritten=', sectionHandwritten.length, 'imageItem=', imageItem?.status ?? 'none');
+
+        if (sectionHandwritten.length > 0) {
+          // ── Per-row matching: each row gets its own status ─────────────────
+          const okColValues  = [];
+          const ngColValues  = [];
+          const naRowNums    = []; // 1-based sheet row numbers for N/A (strikethrough)
+
+          for (let ri = 1; ri < rows.length; ri++) {
+            const rowText  = String(rows[ri][itemsCol] ?? '').trim();
+            const matched  = matchRowToItem(rowText, sectionHandwritten);
+            const st       = matched?.status;
+
+            if (st === 'ok' || st === 'corrected') {
+              okColValues.push([true]);
+              ngColValues.push([false]);
+            } else if (st === 'ng') {
+              okColValues.push([false]);
+              ngColValues.push([true]);
+            } else {
+              // n/a, na, unmatched, or empty row → N/A (strikethrough)
+              okColValues.push([false]);
+              ngColValues.push([false]);
+              naRowNums.push(ri + 1); // +1 because sheet rows are 1-based, header=row1
+            }
+          }
+
+          // Write OK and NG columns in one call each
+          if (okColValues.length > 0) {
+            await writeSheet(spreadsheetToken, sheetId,
+              `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`, okColValues);
+            await writeSheet(spreadsheetToken, sheetId,
+              `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`, ngColValues);
+          }
+
+          // Apply strikethrough row-by-row for N/A rows
+          for (const rowNum of naRowNums) {
+            await applySheetStyle(spreadsheetToken, sheetId,
+              `A${rowNum}:${colLetter(colCount - 1)}${rowNum}`, { font: { strikeThrough: true } });
+          }
+          console.log('[fillReport] inspection per-row done, checkId=', checkId,
+            'ok=', okColValues.filter(r => r[0]).length,
+            'ng=', ngColValues.filter(r => r[0]).length,
+            'na=', naRowNums.length);
+
+        } else if (imageItemConfirmed) {
+          // ── Section-level fallback from image result ──────────────────────
+          const st = imageItem.status;
+          if (st === 'ok' || st === 'corrected') {
+            await writeSheet(spreadsheetToken, sheetId,
+              `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`,
+              Array(numDataRows).fill(null).map(() => [true]));
+            await writeSheet(spreadsheetToken, sheetId,
+              `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`,
+              Array(numDataRows).fill(null).map(() => [false]));
+            console.log('[fillReport] inspection image-ok written, checkId=', checkId);
+          } else if (st === 'ng') {
+            await writeSheet(spreadsheetToken, sheetId,
+              `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`,
+              Array(numDataRows).fill(null).map(() => [false]));
+            await writeSheet(spreadsheetToken, sheetId,
+              `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`,
+              Array(numDataRows).fill(null).map(() => [true]));
+            console.log('[fillReport] inspection image-ng written, checkId=', checkId);
+          } else if (st === 'n/a' || st === 'na') {
+            await applySheetStyle(spreadsheetToken, sheetId,
+              `A2:${colLetter(colCount - 1)}${endRow}`, { font: { strikeThrough: true } });
+            console.log('[fillReport] inspection image-n/a strikethrough, checkId=', checkId);
+          }
+
+        } else {
+          console.log('[fillReport] skip inspection checkId=', checkId, '— no data');
         }
       }
 
@@ -715,7 +818,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           const doneColLetter = colLetter(doneCol);
           await writeSheet(spreadsheetToken, sheetId,
             `${doneColLetter}2:${doneColLetter}${endRow}`,
-            Array(numDataRows).fill(null).map(() => ['✓']));
+            Array(numDataRows).fill(null).map(() => [true]));
           console.log('[fillReport] maintenance done column written');
         } else if (doItem && (mSt === 'n/a' || mSt === 'na')) {
           await applySheetStyle(spreadsheetToken, sheetId,
