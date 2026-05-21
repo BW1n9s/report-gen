@@ -530,6 +530,18 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     // Column index → letter (0→A, 1→B, …, 25→Z)
     const colLetter = n => String.fromCharCode(65 + n);
 
+    // Apply cell style to a range (e.g. strikethrough for N/A rows)
+    async function applySheetStyle(spreadsheetToken, sheetId, range, style) {
+      const url = `${env.LARK_API_URL}/sheets/v2/spreadsheets/${spreadsheetToken}/styles`;
+      const resp = await fetch(url, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: [{ ranges: [`${sheetId}!${range}`], style }] }),
+      });
+      const data = await resp.json();
+      if (data.code !== 0) console.warn('[sheet] style failed code:', data.code, data.msg, 'range:', range);
+    }
+
     // ── Index DO items by section ──────────────────────────────────────────
     const doItemBySection = {};
     for (const it of items) {
@@ -610,25 +622,31 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         if (ngCol === -1) ngCol = 1;
 
         const doItem = checkId ? (doItemBySection[checkId] ?? null) : null;
-        if (!doItem) {
-          console.log('[fillReport] no doItem for checkId=', checkId, '— skipping inspection sheet');
-        } else {
-          const writeValues = rows.slice(1).map(row => {
-            const newRow = [...row];
-            if (doItem.status === 'ok' || doItem.status === 'corrected' || doItem.status === 'pending') {
-              newRow[okCol] = '✓';
-              newRow[ngCol] = '';
-            } else if (doItem.status === 'ng') {
-              newRow[okCol] = '';
-              newRow[ngCol] = '✓';
-            } else if (doItem.status === 'n/a' || doItem.status === 'na') {
-              newRow[okCol] = 'N/A';
-              newRow[ngCol] = '';
-            }
-            return newRow;
-          });
-          await writeSheet(spreadsheetToken, sheetId, `A2:${endCol}${endRow}`, writeValues);
-          console.log('[fillReport] inspection sheet written, status=', doItem.status);
+        const st = doItem?.status;
+        if (!doItem || st === 'pending') {
+          // No confirmed result for this section → leave sheet untouched
+          console.log('[fillReport] skip inspection checkId=', checkId, 'status=', st ?? 'none');
+        } else if (st === 'ok' || st === 'corrected') {
+          // Write ✓ to OK column, clear NG column — only these two columns
+          const n = numDataRows;
+          await writeSheet(spreadsheetToken, sheetId,
+            `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`, Array(n).fill(null).map(() => ['✓']));
+          await writeSheet(spreadsheetToken, sheetId,
+            `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`, Array(n).fill(null).map(() => ['']));
+          console.log('[fillReport] inspection ok/corrected written, checkId=', checkId);
+        } else if (st === 'ng') {
+          // Write ✓ to NG column, clear OK column
+          const n = numDataRows;
+          await writeSheet(spreadsheetToken, sheetId,
+            `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`, Array(n).fill(null).map(() => ['']));
+          await writeSheet(spreadsheetToken, sheetId,
+            `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`, Array(n).fill(null).map(() => ['✓']));
+          console.log('[fillReport] inspection ng written, checkId=', checkId);
+        } else if (st === 'n/a' || st === 'na') {
+          // Strikethrough all data rows via Sheets styles API
+          await applySheetStyle(spreadsheetToken, sheetId,
+            `A2:${colLetter(colCount - 1)}${endRow}`, { font: { strikeThrough: true } });
+          console.log('[fillReport] inspection n/a strikethrough, checkId=', checkId);
         }
       }
 
@@ -645,42 +663,45 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         const serialSuffix = vinMis ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
         const matchedVType = VTYPE_MAP.find(o => o.types.includes(vehicleTypeForSheet));
 
-        const writeValues = rows.slice(1).map(row => {
-          const label  = String(row[itemCol] ?? '').toLowerCase();
-          const newRow = [...row];
+        // Build values for ONLY the detail column — avoids adding blank columns/rows
+        const detailColValues = rows.slice(1).map(row => {
+          const label = String(row[itemCol] ?? '').toLowerCase();
+          let val = null; // null → don't overwrite this row
 
           if      (label.includes('customer') || label.includes('客户'))
-            newRow[detailCol] = pl.customer ?? '';
+            val = pl.customer ?? '';
           else if (label.includes('invoice') || label.includes('order') || label.includes('单号') || label.includes('发票'))
-            newRow[detailCol] = pl.invoiceNumber ?? '';
+            val = pl.invoiceNumber ?? '';
           else if (label.includes('model') || label.includes('型号'))
-            newRow[detailCol] = v.model ?? '';
+            val = v.model ?? '';
           else if (label.includes('vin') || label.includes('serial') || label.includes('chassis') || label.includes('车架'))
-            newRow[detailCol] = `${effectiveSerial}${serialSuffix}`;
+            val = `${effectiveSerial}${serialSuffix}`;
           else if (label.includes('hour') || label.includes('小时'))
-            newRow[detailCol] = v.hours ? `${v.hours}h` : '';
+            val = v.hours ? `${v.hours}h` : '';
           else if (label.includes('date') || label.includes('日期'))
-            newRow[detailCol] = nowDate;
+            val = nowDate;
           else if (label.includes('tech') || label.includes('技师'))
-            newRow[detailCol] = session.technician ?? '';
+            val = session.technician ?? '';
           else if (label.includes('type') || label.includes('类型') || label.includes('车辆')) {
-            // Tick the matching vehicle type option in the existing cell text
             if (matchedVType) {
               let cellText = String(row[detailCol] ?? '');
-              // Reset all checkboxes, then tick the matching one
               cellText = cellText.replace(/☑/g, '☐');
               for (const kw of matchedVType.keywords) {
                 const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 const re = new RegExp('☐([^☐☑]*?' + escaped + '[^☐☑]*)');
                 if (re.test(cellText)) { cellText = cellText.replace(re, '☑$1'); break; }
               }
-              newRow[detailCol] = cellText;
+              val = cellText;
             }
           }
-          return newRow;
+          // Keep existing cell value if we have nothing to write
+          return [val !== null ? val : String(row[detailCol] ?? '')];
         });
-        await writeSheet(spreadsheetToken, sheetId, `A2:${endCol}${endRow}`, writeValues);
-        console.log('[fillReport] basic_info sheet written');
+        // Write only the detail column (e.g. "B2:B9") — no extra columns or rows
+        const detailColLetter = colLetter(detailCol);
+        await writeSheet(spreadsheetToken, sheetId,
+          `${detailColLetter}2:${detailColLetter}${endRow}`, detailColValues);
+        console.log('[fillReport] basic_info detail column written');
       }
 
       // ── Maintenance sheet: Done | Items ───────────────────────────────────
@@ -689,14 +710,18 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         if (doneCol === -1) doneCol = 0;
 
         const doItem = checkId ? (doItemBySection[checkId] ?? null) : null;
-        if (doItem && (doItem.status === 'ok' || doItem.status === 'corrected')) {
-          const writeValues = rows.slice(1).map(row => {
-            const newRow = [...row];
-            newRow[doneCol] = '✓';
-            return newRow;
-          });
-          await writeSheet(spreadsheetToken, sheetId, `A2:${endCol}${endRow}`, writeValues);
-          console.log('[fillReport] maintenance sheet written');
+        const mSt = doItem?.status;
+        if (doItem && (mSt === 'ok' || mSt === 'corrected')) {
+          const doneColLetter = colLetter(doneCol);
+          await writeSheet(spreadsheetToken, sheetId,
+            `${doneColLetter}2:${doneColLetter}${endRow}`,
+            Array(numDataRows).fill(null).map(() => ['✓']));
+          console.log('[fillReport] maintenance done column written');
+        } else if (doItem && (mSt === 'n/a' || mSt === 'na')) {
+          await applySheetStyle(spreadsheetToken, sheetId,
+            `A2:${colLetter(colCount - 1)}${endRow}`, { font: { strikeThrough: true } });
+        } else {
+          console.log('[fillReport] skip maintenance checkId=', checkId, 'status=', mSt ?? 'none');
         }
       }
 
@@ -705,8 +730,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         let resultCol = headerRow.findIndex(h => h.includes('result') || h.includes('结果'));
         if (resultCol === -1) resultCol = 1;
 
-        const writeValues = rows.slice(1).map(row => {
-          const newRow = [...row];
+        const resultColLetter = colLetter(resultCol);
+        const resultColValues = rows.slice(1).map(row => {
           let cellText = String(row[resultCol] ?? '');
           cellText = cellText.replace(/☑/g, '☐'); // reset
           if (!hasAnyNg) {
@@ -718,11 +743,11 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
               .replace(/☐(\s*(?:No|否))/g,  '☑$1')
               .replace(/(No|否)(\s*)☐/g,    '$1$2☑');
           }
-          newRow[resultCol] = cellText;
-          return newRow;
+          return [cellText];
         });
-        await writeSheet(spreadsheetToken, sheetId, `A2:${endCol}${endRow}`, writeValues);
-        console.log('[fillReport] final_result sheet written');
+        await writeSheet(spreadsheetToken, sheetId,
+          `${resultColLetter}2:${resultColLetter}${endRow}`, resultColValues);
+        console.log('[fillReport] final_result result column written');
       }
 
       // ── Remarks and Photos (Docs text blocks between sheets) ───────────────
@@ -735,6 +760,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         const b = blockMap[rootChildren[i]];
         if (!b || b.block_type !== 2) continue;
         const text = getBlockText(b);
+        console.log('[fillReport] between-sheet block i=', i, 'checkId=', checkId, 'text=', JSON.stringify(text).slice(0, 80));
 
         if ((text.includes('Remarks') || text.includes('备注')) && checkId) {
           const doItem = doItemBySection[checkId];
@@ -744,11 +770,12 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
             await putBlock(rootChildren[i], label + doItem.reading);
           }
         } else if ((text.includes('Photos') || text.includes('照片')) && checkId) {
-          for (const it of items) {
-            if (it.type !== 'image' || !it.imageKey || !it.originalMsgId) continue;
-            if (it.check_id === checkId || (checkId === 'basic_info' && it.check_id === 'nameplate'))
-              tablePhotoTasks.push({ item: it, afterRootIdx: i });
-          }
+          const matchingImgs = items.filter(it =>
+            it.type === 'image' && it.imageKey && it.originalMsgId &&
+            (it.check_id === checkId || (checkId === 'basic_info' && it.check_id === 'nameplate'))
+          );
+          console.log('[fillReport] photos block, checkId=', checkId, 'matching imgs=', matchingImgs.length);
+          for (const it of matchingImgs) tablePhotoTasks.push({ item: it, afterRootIdx: i });
         }
       }
     } // end for tableId
