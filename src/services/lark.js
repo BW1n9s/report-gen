@@ -544,12 +544,17 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       const encodedRange = encodeURIComponent(`${sheetId}!${range}`);
       const url = `${env.LARK_API_URL}/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodedRange}`;
       const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      const data = await resp.json();
+      let data;
+      try { data = await resp.json(); } catch (e) {
+        console.warn('[sheet] read JSON parse error:', e.message, 'range:', `${sheetId}!${range}`);
+        return [];
+      }
       if (data.code !== 0) console.warn('[sheet] read failed code:', data.code, data.msg, 'range:', `${sheetId}!${range}`);
       return data.data?.valueRange?.values ?? [];
     }
 
-    // Write a range to an embedded spreadsheet (PUT overwrites given range)
+    // Write a range to an embedded spreadsheet (PUT overwrites given range).
+    // NOTE: checkbox (bool) cells require integer 1/0, not JS true/false.
     async function writeSheet(spreadsheetToken, sheetId, range, values) {
       const url = `${env.LARK_API_URL}/sheets/v2/spreadsheets/${spreadsheetToken}/values`;
       const resp = await fetch(url, {
@@ -557,7 +562,11 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ valueRange: { range: `${sheetId}!${range}`, values } }),
       });
-      const data = await resp.json();
+      let data;
+      try { data = await resp.json(); } catch (e) {
+        console.warn('[sheet] write JSON parse error:', e.message, 'range:', range);
+        return {};
+      }
       if (data.code !== 0) console.warn('[sheet] write failed code:', data.code, data.msg, 'range:', range);
       return data;
     }
@@ -573,7 +582,11 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ data: [{ ranges: [`${sheetId}!${range}`], style }] }),
       });
-      const data = await resp.json();
+      let data;
+      try { data = await resp.json(); } catch (e) {
+        console.warn('[sheet] style JSON parse error:', e.message, 'range:', range);
+        return;
+      }
       if (data.code !== 0) console.warn('[sheet] style failed code:', data.code, data.msg, 'range:', range);
     }
 
@@ -629,8 +642,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
             body: JSON.stringify({ link_share_entity: 'tenant_editable', copy_entity: 'tenant_editable' }),
           },
         );
-        const pd = await pr.json();
-        console.log('[fillReport] set sheet perms ssToken=', ssToken, 'code=', pd.code, pd.msg ?? '');
+        const pd = await pr.json().catch(() => ({}));
+        console.log('[fillReport] set sheet perms ssToken=', ssToken, 'code=', pd?.code, pd?.msg ?? '');
       } catch (e) {
         console.warn('[fillReport] set sheet perms failed ssToken=', ssToken, e.message);
       }
@@ -721,15 +734,15 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
             const st       = matched?.status;
 
             if (st === 'ok' || st === 'corrected') {
-              okColValues.push([true]);
-              ngColValues.push([false]);
+              okColValues.push([1]);
+              ngColValues.push([0]);
             } else if (st === 'ng') {
-              okColValues.push([false]);
-              ngColValues.push([true]);
+              okColValues.push([0]);
+              ngColValues.push([1]);
             } else {
               // n/a, na, unmatched, or empty row → N/A (strikethrough)
-              okColValues.push([false]);
-              ngColValues.push([false]);
+              okColValues.push([0]);
+              ngColValues.push([0]);
               naRowNums.push(ri + 1); // +1 because sheet rows are 1-based, header=row1
             }
           }
@@ -758,18 +771,18 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           if (st === 'ok' || st === 'corrected') {
             await writeSheet(spreadsheetToken, sheetId,
               `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`,
-              Array(numDataRows).fill(null).map(() => [true]));
+              Array(numDataRows).fill(null).map(() => [1]));
             await writeSheet(spreadsheetToken, sheetId,
               `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`,
-              Array(numDataRows).fill(null).map(() => [false]));
+              Array(numDataRows).fill(null).map(() => [0]));
             console.log('[fillReport] inspection image-ok written, checkId=', checkId);
           } else if (st === 'ng') {
             await writeSheet(spreadsheetToken, sheetId,
               `${colLetter(okCol)}2:${colLetter(okCol)}${endRow}`,
-              Array(numDataRows).fill(null).map(() => [false]));
+              Array(numDataRows).fill(null).map(() => [0]));
             await writeSheet(spreadsheetToken, sheetId,
               `${colLetter(ngCol)}2:${colLetter(ngCol)}${endRow}`,
-              Array(numDataRows).fill(null).map(() => [true]));
+              Array(numDataRows).fill(null).map(() => [1]));
             console.log('[fillReport] inspection image-ng written, checkId=', checkId);
           } else if (st === 'n/a' || st === 'na') {
             await applySheetStyle(spreadsheetToken, sheetId,
@@ -847,7 +860,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           const doneColLetter = colLetter(doneCol);
           await writeSheet(spreadsheetToken, sheetId,
             `${doneColLetter}2:${doneColLetter}${endRow}`,
-            Array(numDataRows).fill(null).map(() => [true]));
+            Array(numDataRows).fill(null).map(() => [1]));
           console.log('[fillReport] maintenance done column written');
         } else if (doItem && (mSt === 'n/a' || mSt === 'na')) {
           await applySheetStyle(spreadsheetToken, sheetId,
