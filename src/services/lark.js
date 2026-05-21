@@ -853,32 +853,64 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         console.log('[fillReport] final_result result column written');
       }
 
-      // ── Remarks and Photos (Docs text blocks between sheets) ───────────────
+      // ── Remarks and Photos (blocks between this sheet and the next) ──────────
       const nextTblRootIdx = tableBlockIds
         .map(id => rootChildren.indexOf(id))
         .filter(idx => idx > tblRootIdx)
         .reduce((min, idx) => Math.min(min, idx), rootChildren.length);
 
+      let foundPhotosBlock = false;
+
       for (let i = tblRootIdx + 1; i < nextTblRootIdx; i++) {
         const b = blockMap[rootChildren[i]];
-        if (!b || b.block_type !== 2) continue;
-        const text = getBlockText(b);
-        console.log('[fillReport] between-sheet block i=', i, 'checkId=', checkId, 'text=', JSON.stringify(text).slice(0, 80));
+        if (!b) continue;
+
+        // Extract text from plain-text blocks (type 2) AND heading blocks (type 3-11).
+        // Previous code filtered to type 2 only — that silently skipped headings used
+        // as "Photos / 照片" labels, so no photos were ever queued.
+        let text = '';
+        if (b.block_type === 2) {
+          text = getBlockText(b);
+        } else if (b.block_type >= 3 && b.block_type <= 11) {
+          text = getHeadingText(b) ?? '';
+        }
+
+        // Log every block so we can see the inter-sheet structure in production logs
+        console.log('[fillReport] between-sheet block i=', i,
+          'type=', b.block_type, 'checkId=', checkId,
+          'text=', JSON.stringify(text).slice(0, 80));
+
+        if (!text) continue;
 
         if ((text.includes('Remarks') || text.includes('备注')) && checkId) {
           const doItem = doItemBySection[checkId];
-          if (doItem?.reading) {
+          if (doItem?.reading && b.block_type === 2) {
             const sep   = Math.max(text.lastIndexOf('：'), text.lastIndexOf(':'));
             const label = sep >= 0 ? text.substring(0, sep + 1) : text + '：';
             await putBlock(rootChildren[i], label + doItem.reading);
           }
-        } else if ((text.includes('Photos') || text.includes('照片')) && checkId) {
+        } else if ((text.includes('Photos') || text.includes('照片') || text.includes('Photo')) && checkId) {
+          foundPhotosBlock = true;
           const matchingImgs = items.filter(it =>
             it.type === 'image' && it.imageKey && it.originalMsgId &&
             (it.check_id === checkId || (checkId === 'basic_info' && it.check_id === 'nameplate'))
           );
-          console.log('[fillReport] photos block, checkId=', checkId, 'matching imgs=', matchingImgs.length);
+          console.log('[fillReport] photos block found, checkId=', checkId, 'matching imgs=', matchingImgs.length);
           for (const it of matchingImgs) tablePhotoTasks.push({ item: it, afterRootIdx: i });
+        }
+      }
+
+      // Fallback: no dedicated Photos block found between sheets — insert images
+      // directly after the sheet block itself so photos still appear in the doc.
+      if (!foundPhotosBlock && checkId) {
+        const matchingImgs = items.filter(it =>
+          it.type === 'image' && it.imageKey && it.originalMsgId &&
+          (it.check_id === checkId || (checkId === 'basic_info' && it.check_id === 'nameplate'))
+        );
+        if (matchingImgs.length > 0) {
+          console.log('[fillReport] no photos block — fallback after sheet, checkId=', checkId,
+            'imgs=', matchingImgs.length);
+          for (const it of matchingImgs) tablePhotoTasks.push({ item: it, afterRootIdx: tblRootIdx });
         }
       }
     } // end for tableId
