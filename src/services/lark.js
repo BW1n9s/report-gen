@@ -609,6 +609,35 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     const hasAnyNg     = items.some(i => i.status === 'ng');
     const tablePhotoTasks = []; // { item, afterRootIdx }
 
+    // ── Grant Sheets API access on all embedded spreadsheets ──────────────
+    // copyDocumentToRoot sets tenant_editable on the DOCX object only.
+    // The embedded spreadsheet objects need their own Drive permission entry
+    // (type=sheet) or the Sheets API returns 99991672 No Permission on every
+    // read/write.  Collect unique spreadsheet tokens first, then patch each.
+    const uniqueSSTokens = new Set();
+    for (const id of tableBlockIds) {
+      const rawTok = blockMap[id]?.sheet?.token;
+      if (rawTok) uniqueSSTokens.add(splitSheetToken(rawTok).spreadsheetToken);
+    }
+    for (const ssToken of uniqueSSTokens) {
+      try {
+        const pr = await fetch(
+          `${env.LARK_API_URL}/drive/v1/permissions/${ssToken}/public?type=sheet`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ link_share_entity: 'tenant_editable', copy_entity: 'tenant_editable' }),
+          },
+        );
+        const pd = await pr.json();
+        console.log('[fillReport] set sheet perms ssToken=', ssToken, 'code=', pd.code, pd.msg ?? '');
+      } catch (e) {
+        console.warn('[fillReport] set sheet perms failed ssToken=', ssToken, e.message);
+      }
+    }
+    // Brief pause for Lark to propagate permission changes before reads
+    if (uniqueSSTokens.size > 0) await new Promise(r => setTimeout(r, 800));
+
     // ── Process each embedded sheet ────────────────────────────────────────
     for (const tableId of tableBlockIds) {
       const tblRootIdx  = rootChildren.indexOf(tableId);
