@@ -455,7 +455,7 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
   }
 
   if (isTableFormat) {
-    console.log('[fillReport] table format detected, tables:', tableBlockIds.length);
+    console.log('[fillReport] sheet format detected, sheets:', tableBlockIds.length);
 
     // ── Section heading → check_id mapping ────────────────────────────────
     const SECTION_PATTERNS = [
@@ -491,10 +491,44 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
           const text = getHeadingText(b);
           if (text) return { text, idx: i };
         }
-        if (b.block_type === 30) break; // hit another table — stop
+        if (b.block_type === 30) break; // hit another sheet — stop
       }
       return null;
     }
+
+    // ── Sheets API helpers ─────────────────────────────────────────────────
+
+    // block_type 30 sheet.token = "{spreadsheetToken}_{sheetId}"
+    function splitSheetToken(tok) {
+      const i = tok.lastIndexOf('_');
+      return { spreadsheetToken: tok.slice(0, i), sheetId: tok.slice(i + 1) };
+    }
+
+    // Read a range from an embedded spreadsheet
+    async function readSheet(spreadsheetToken, sheetId, range) {
+      const encodedRange = encodeURIComponent(`${sheetId}!${range}`);
+      const url = `${env.LARK_API_URL}/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodedRange}`;
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await resp.json();
+      if (data.code !== 0) console.warn('[sheet] read failed code:', data.code, data.msg, 'range:', `${sheetId}!${range}`);
+      return data.data?.valueRange?.values ?? [];
+    }
+
+    // Write a range to an embedded spreadsheet (PUT overwrites given range)
+    async function writeSheet(spreadsheetToken, sheetId, range, values) {
+      const url = `${env.LARK_API_URL}/sheets/v2/spreadsheets/${spreadsheetToken}/values`;
+      const resp = await fetch(url, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ valueRange: { range: `${sheetId}!${range}`, values } }),
+      });
+      const data = await resp.json();
+      if (data.code !== 0) console.warn('[sheet] write failed code:', data.code, data.msg, 'range:', range);
+      return data;
+    }
+
+    // Column index → letter (0→A, 1→B, …, 25→Z)
+    const colLetter = n => String.fromCharCode(65 + n);
 
     // ── Index DO items by section ──────────────────────────────────────────
     const doItemBySection = {};
@@ -513,53 +547,8 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
     }
     console.log('[fillReport] doItemBySection keys:', Object.keys(doItemBySection));
 
-    // ── Table cell helpers ─────────────────────────────────────────────────
-
-    async function getCellText(cellId) {
-      const cell = blockMap[cellId];
-      if (!cell) return '';
-      return (cell.children ?? []).map(cid => getBlockText(blockMap[cid] ?? {})).join(' ').trim();
-    }
-
-    async function tickCell(cellId, done) {
-      const cell = blockMap[cellId];
-      if (!cell) return;
-      for (const cid of (cell.children ?? [])) {
-        const cb = blockMap[cid];
-        if (!cb) continue;
-        if (cb.block_type === 17) { await putTodoBlock(cid, done); return; }
-        if (cb.block_type === 2) {
-          await patchBlock(cid, { update_text_elements: { elements: [{ text_run: { content: done ? '☑' : '□' } }] } });
-          return;
-        }
-      }
-    }
-
-    async function strikethroughCell(cellId) {
-      const cell = blockMap[cellId];
-      if (!cell) return;
-      for (const cid of (cell.children ?? [])) {
-        const cb = blockMap[cid];
-        if (!cb || cb.block_type !== 2) continue;
-        const text = getBlockText(cb);
-        if (!text.trim()) continue;
-        const sep = Math.max(text.indexOf('：'), text.indexOf(':'));
-        if (sep > 0) {
-          await patchBlock(cid, {
-            update_text_elements: { elements: [
-              { text_run: { content: text.substring(0, sep + 1) } },
-              { text_run: { content: text.substring(sep + 1), text_element_style: { strikethrough: true } } },
-            ]},
-          });
-        } else {
-          await putTextBlockStyled(cid, text, true);
-        }
-        break;
-      }
-    }
-
     // ── Vehicle type map ───────────────────────────────────────────────────
-    const vehicleTypeForTable = v.type ?? '';
+    const vehicleTypeForSheet = v.type ?? '';
     const VTYPE_MAP = [
       { keywords: ['Diesel Forklift', '柴油叉车'],   types: ['FORKLIFT_ICE', 'FORKLIFT_DIESEL'] },
       { keywords: ['LPG', 'Petrol', '汽油'],          types: ['FORKLIFT_LPG', 'FORKLIFT_PETROL', 'FORKLIFT_GAS'] },
@@ -570,79 +559,83 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
       { keywords: ['Walkie', '步行'],                 types: ['FORKLIFT_WALKIE'] },
     ];
 
-    // Overall NG status (for final result table)
-    const hasAnyNg = items.some(i => i.status === 'ng');
-
-    // Photo tasks: collected here, inserted after all tables are processed
+    const hasAnyNg     = items.some(i => i.status === 'ng');
     const tablePhotoTasks = []; // { item, afterRootIdx }
 
-    // ── Process each table ─────────────────────────────────────────────────
+    // ── Process each embedded sheet ────────────────────────────────────────
     for (const tableId of tableBlockIds) {
-      const tblRootIdx = rootChildren.indexOf(tableId);
-      const tbl = blockMap[tableId];
-      if (!tbl) continue;
+      const tblRootIdx  = rootChildren.indexOf(tableId);
+      const sheetBlock  = blockMap[tableId];
+      const rawToken    = sheetBlock?.sheet?.token;
+      if (!rawToken) { console.warn('[fillReport] no sheet.token for block', tableId); continue; }
 
-      const colSize = tbl.table?.property?.column_size ?? 2;
-      const rowSize = tbl.table?.property?.row_size ?? Math.ceil((tbl.children?.length ?? 0) / colSize);
-      const cells   = tbl.children ?? [];
-      if (cells.length < colSize) continue;
+      const { spreadsheetToken, sheetId } = splitSheetToken(rawToken);
+      console.log('[fillReport] processing sheet block', tableId, 'ssToken=', spreadsheetToken, 'sheetId=', sheetId);
 
-      // Section check_id from heading above this table
+      // Read up to 60 rows (header + data)
+      const rawValues = await readSheet(spreadsheetToken, sheetId, 'A1:Z60');
+      if (!rawValues || rawValues.length < 2) { console.warn('[fillReport] sheet too short', tableId); continue; }
+
+      // Pad all rows to the same width
+      const colCount = Math.max(...rawValues.map(r => r?.length ?? 0), 1);
+      const rows = rawValues.map(r => {
+        const padded = [...(r ?? [])].map(c => (c == null ? '' : c));
+        while (padded.length < colCount) padded.push('');
+        return padded;
+      });
+
+      const headerRow = rows[0].map(c => String(c).toLowerCase().trim());
+      const numDataRows = rows.length - 1;
+
+      // Detect table type from header
+      let tableType = 'unknown';
+      if      (headerRow.some(h => h === 'ok') && headerRow.some(h => h === 'ng')) tableType = 'inspection';
+      else if (headerRow.some(h => h.startsWith('done')))                           tableType = 'maintenance';
+      else if (headerRow.some(h => h.includes('result') || h.includes('结果')))     tableType = 'final_result';
+      else if (headerRow.some(h => h.includes('detail') || h.includes('内容')))     tableType = 'basic_info';
+
+      // Section from heading above this sheet
       const hdg     = findHeadingBeforeTable(tblRootIdx);
       const checkId = hdg ? headingTextToCheckId(hdg.text) : null;
-      console.log('[fillReport] table', tableId, 'checkId=', checkId, 'hdg=', hdg?.text?.slice(0, 40));
+      console.log('[fillReport] sheet type=', tableType, 'checkId=', checkId, 'hdg=', hdg?.text?.slice(0, 40), 'rows=', numDataRows);
 
-      // Table type from header row
-      const hdrTexts = [];
-      for (let c = 0; c < colSize; c++) hdrTexts.push((await getCellText(cells[c])).trim());
-      const hdrJoined = hdrTexts.join('|').toLowerCase();
+      const endCol   = colLetter(colCount - 1);
+      const endRow   = rows.length; // 1-based: header is row 1, last data row is rows.length
 
-      let tableType = 'unknown';
-      if      (hdrJoined.includes('ok') && hdrJoined.includes('ng')) tableType = 'inspection';
-      else if (hdrJoined.includes('done'))                            tableType = 'maintenance';
-      else if (hdrJoined.includes('result') || hdrJoined.includes('结果')) tableType = 'final_result';
-      else if (hdrJoined.includes('detail') || hdrJoined.includes('内容'))  tableType = 'basic_info';
-      console.log('[fillReport] tableType=', tableType, 'headers=', hdrTexts);
-
-      // Column indices
-      let okCol = -1, ngCol = -1, itemCol = -1, doneCol = -1, detailCol = -1, resultCol = -1;
-      for (let c = 0; c < colSize; c++) {
-        const h = hdrTexts[c].toLowerCase();
-        if      (h === 'ok')                                                   okCol     = c;
-        else if (h === 'ng')                                                   ngCol     = c;
-        else if (h.startsWith('done'))                                         doneCol   = c;
-        else if (h.includes('detail') || h.includes('内容'))                  detailCol = c;
-        else if (h.includes('result') || h.includes('结果'))                  resultCol = c;
-        else if (h.includes('item') || h.includes('检查') || h.includes('项目')) itemCol = c;
-      }
-
-      // ── Inspection table: OK | NG | Items ─────────────────────────────────
+      // ── Inspection sheet: OK | NG | Items ─────────────────────────────────
       if (tableType === 'inspection') {
-        if (okCol   === -1) okCol   = 0;
-        if (ngCol   === -1) ngCol   = 1;
-        if (itemCol === -1) itemCol = 2;
-        const doItem = checkId ? (doItemBySection[checkId] ?? null) : null;
+        let okCol = headerRow.indexOf('ok');
+        let ngCol = headerRow.findIndex(h => h === 'ng');
+        if (okCol === -1) okCol = 0;
+        if (ngCol === -1) ngCol = 1;
 
-        for (let r = 1; r < rowSize; r++) {
-          const base = r * colSize;
-          if (base + Math.max(okCol, ngCol, itemCol) >= cells.length) break;
-          if (!doItem) continue;
-          const okCellId   = cells[base + okCol];
-          const ngCellId   = cells[base + ngCol];
-          const itemCellId = cells[base + itemCol];
-          if (doItem.status === 'ok' || doItem.status === 'corrected') {
-            await tickCell(okCellId, true);
-            await strikethroughCell(itemCellId);
-          } else if (doItem.status === 'ng') {
-            await tickCell(ngCellId, true);
-          } else if (doItem.status === 'n/a' || doItem.status === 'na') {
-            await strikethroughCell(itemCellId);
-          }
+        const doItem = checkId ? (doItemBySection[checkId] ?? null) : null;
+        if (!doItem) {
+          console.log('[fillReport] no doItem for checkId=', checkId, '— skipping inspection sheet');
+        } else {
+          const writeValues = rows.slice(1).map(row => {
+            const newRow = [...row];
+            if (doItem.status === 'ok' || doItem.status === 'corrected' || doItem.status === 'pending') {
+              newRow[okCol] = '✓';
+              newRow[ngCol] = '';
+            } else if (doItem.status === 'ng') {
+              newRow[okCol] = '';
+              newRow[ngCol] = '✓';
+            } else if (doItem.status === 'n/a' || doItem.status === 'na') {
+              newRow[okCol] = 'N/A';
+              newRow[ngCol] = '';
+            }
+            return newRow;
+          });
+          await writeSheet(spreadsheetToken, sheetId, `A2:${endCol}${endRow}`, writeValues);
+          console.log('[fillReport] inspection sheet written, status=', doItem.status);
         }
       }
 
-      // ── Basic info table: Item | Details ──────────────────────────────────
+      // ── Basic info sheet: Item | Details ──────────────────────────────────
       else if (tableType === 'basic_info') {
+        let itemCol   = headerRow.findIndex(h => h.includes('item') || h.includes('项目'));
+        let detailCol = headerRow.findIndex(h => h.includes('detail') || h.includes('内容'));
         if (itemCol   === -1) itemCol   = 0;
         if (detailCol === -1) detailCol = 1;
 
@@ -650,121 +643,89 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         const vinMis       = pl.vin && v.serial && v.serialSource !== 'PICKING_LIST' &&
           pl.vin.replace(/[\s\-]/g, '').toUpperCase() !== v.serial.replace(/[\s\-]/g, '').toUpperCase();
         const serialSuffix = vinMis ? ` ⚠️ PL: ${pl.vin} / NP: ${v.serial}` : '';
+        const matchedVType = VTYPE_MAP.find(o => o.types.includes(vehicleTypeForSheet));
 
-        for (let r = 1; r < rowSize; r++) {
-          const base       = r * colSize;
-          if (base + detailCol >= cells.length) break;
-          const rowLabel   = (await getCellText(cells[base + itemCol])).toLowerCase();
-          const detailCell = blockMap[cells[base + detailCol]];
-          if (!detailCell) continue;
-          const childIds   = detailCell.children ?? [];
+        const writeValues = rows.slice(1).map(row => {
+          const label  = String(row[itemCol] ?? '').toLowerCase();
+          const newRow = [...row];
 
-          const fillDetail = async (val) => { if (childIds[0]) await putBlock(childIds[0], val); };
-
-          if      (rowLabel.includes('customer') || rowLabel.includes('客户')) {
-            await fillDetail(pl.customer ?? '');
-          } else if (rowLabel.includes('invoice') || rowLabel.includes('order') || rowLabel.includes('发票') || rowLabel.includes('订单')) {
-            await fillDetail(pl.invoiceNumber ?? '');
-          } else if (rowLabel.includes('model') || rowLabel.includes('型号')) {
-            await fillDetail(v.model ?? '');
-          } else if (rowLabel.includes('serial') || rowLabel.includes('vin') || rowLabel.includes('车架')) {
-            await fillDetail(`${effectiveSerial}${serialSuffix}`);
-          } else if (rowLabel.includes('hour') || rowLabel.includes('小时')) {
-            await fillDetail(v.hours ? `${v.hours}h` : '');
-          } else if (rowLabel.includes('date') || rowLabel.includes('日期')) {
-            await fillDetail(nowDate);
-          } else if (rowLabel.includes('type') || rowLabel.includes('类型')) {
-            // Vehicle type — tick the matching inline checkbox option
-            const matchedEntry = VTYPE_MAP.find(o => o.types.includes(vehicleTypeForTable));
-            if (matchedEntry) {
-              const todoKids = childIds.map(cid => blockMap[cid]).filter(b => b?.block_type === 17);
-              const textKids = childIds.map(cid => blockMap[cid]).filter(b => b?.block_type === 2);
-
-              if (todoKids.length > 0) {
-                // One todo block per option
-                for (const tb of todoKids) {
-                  if (matchedEntry.keywords.some(kw => getBlockText(tb).includes(kw)))
-                    await putTodoBlock(tb.block_id, true);
-                }
-              } else if (textKids.length === 1) {
-                // All options in a single text block with ☐ markers
-                const tb       = textKids[0];
-                const fullText = getBlockText(tb);
-                let newText    = fullText;
-                for (const kw of matchedEntry.keywords) {
-                  const re = new RegExp('☐([^☐]*?' + kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')');
-                  if (re.test(newText)) { newText = newText.replace(re, '☑$1'); break; }
-                }
-                if (newText !== fullText) await putBlock(tb.block_id, newText);
-              } else {
-                // One text block per option
-                for (const tb of textKids) {
-                  const tbText = getBlockText(tb);
-                  if (tbText.includes('☐') && matchedEntry.keywords.some(kw => tbText.includes(kw))) {
-                    await putBlock(tb.block_id, tbText.replace('☐', '☑'));
-                    break;
-                  }
-                }
+          if      (label.includes('customer') || label.includes('客户'))
+            newRow[detailCol] = pl.customer ?? '';
+          else if (label.includes('invoice') || label.includes('order') || label.includes('单号') || label.includes('发票'))
+            newRow[detailCol] = pl.invoiceNumber ?? '';
+          else if (label.includes('model') || label.includes('型号'))
+            newRow[detailCol] = v.model ?? '';
+          else if (label.includes('vin') || label.includes('serial') || label.includes('chassis') || label.includes('车架'))
+            newRow[detailCol] = `${effectiveSerial}${serialSuffix}`;
+          else if (label.includes('hour') || label.includes('小时'))
+            newRow[detailCol] = v.hours ? `${v.hours}h` : '';
+          else if (label.includes('date') || label.includes('日期'))
+            newRow[detailCol] = nowDate;
+          else if (label.includes('tech') || label.includes('技师'))
+            newRow[detailCol] = session.technician ?? '';
+          else if (label.includes('type') || label.includes('类型') || label.includes('车辆')) {
+            // Tick the matching vehicle type option in the existing cell text
+            if (matchedVType) {
+              let cellText = String(row[detailCol] ?? '');
+              // Reset all checkboxes, then tick the matching one
+              cellText = cellText.replace(/☑/g, '☐');
+              for (const kw of matchedVType.keywords) {
+                const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const re = new RegExp('☐([^☐☑]*?' + escaped + '[^☐☑]*)');
+                if (re.test(cellText)) { cellText = cellText.replace(re, '☑$1'); break; }
               }
+              newRow[detailCol] = cellText;
             }
           }
-        }
+          return newRow;
+        });
+        await writeSheet(spreadsheetToken, sheetId, `A2:${endCol}${endRow}`, writeValues);
+        console.log('[fillReport] basic_info sheet written');
       }
 
-      // ── Maintenance table: Done | Items ────────────────────────────────────
+      // ── Maintenance sheet: Done | Items ───────────────────────────────────
       else if (tableType === 'maintenance') {
+        let doneCol = headerRow.findIndex(h => h.startsWith('done'));
         if (doneCol === -1) doneCol = 0;
-        if (itemCol === -1) itemCol = 1;
+
         const doItem = checkId ? (doItemBySection[checkId] ?? null) : null;
         if (doItem && (doItem.status === 'ok' || doItem.status === 'corrected')) {
-          for (let r = 1; r < rowSize; r++) {
-            const base = r * colSize;
-            if (base + doneCol >= cells.length) break;
-            await tickCell(cells[base + doneCol], true);
-          }
+          const writeValues = rows.slice(1).map(row => {
+            const newRow = [...row];
+            newRow[doneCol] = '✓';
+            return newRow;
+          });
+          await writeSheet(spreadsheetToken, sheetId, `A2:${endCol}${endRow}`, writeValues);
+          console.log('[fillReport] maintenance sheet written');
         }
       }
 
-      // ── Final result table: Item | Result ──────────────────────────────────
+      // ── Final result sheet: Item | Result ─────────────────────────────────
       else if (tableType === 'final_result') {
-        if (itemCol   === -1) itemCol   = 0;
+        let resultCol = headerRow.findIndex(h => h.includes('result') || h.includes('结果'));
         if (resultCol === -1) resultCol = 1;
 
-        for (let r = 1; r < rowSize; r++) {
-          const base       = r * colSize;
-          if (base + resultCol >= cells.length) break;
-          const resultCell = blockMap[cells[base + resultCol]];
-          if (!resultCell) continue;
-
-          for (const cid of (resultCell.children ?? [])) {
-            const cb = blockMap[cid];
-            if (!cb || cb.block_type !== 2) continue;
-            const text = getBlockText(cb);
-            if (!text.includes('☐') && !text.includes('☑')) continue;
-
-            let newText = text;
-            if (!hasAnyNg) {
-              // Tick Yes, clear No
-              newText = newText
-                .replace(/☐(\s*(?:Yes|是))/g, '☑$1')
-                .replace(/☑(\s*(?:No|否))/g,  '☐$1')
-                .replace(/(Yes|是)(\s*)☐/g,    '$1$2☑')
-                .replace(/(No|否)(\s*)☑/g,     '$1$2☐');
-            } else {
-              // Tick No, clear Yes
-              newText = newText
-                .replace(/☐(\s*(?:No|否))/g,  '☑$1')
-                .replace(/☑(\s*(?:Yes|是))/g, '☐$1')
-                .replace(/(No|否)(\s*)☐/g,    '$1$2☑')
-                .replace(/(Yes|是)(\s*)☑/g,   '$1$2☐');
-            }
-            if (newText !== text) await putBlock(cid, newText);
-            break;
+        const writeValues = rows.slice(1).map(row => {
+          const newRow = [...row];
+          let cellText = String(row[resultCol] ?? '');
+          cellText = cellText.replace(/☑/g, '☐'); // reset
+          if (!hasAnyNg) {
+            cellText = cellText
+              .replace(/☐(\s*(?:Yes|是))/g, '☑$1')
+              .replace(/(Yes|是)(\s*)☐/g,   '$1$2☑');
+          } else {
+            cellText = cellText
+              .replace(/☐(\s*(?:No|否))/g,  '☑$1')
+              .replace(/(No|否)(\s*)☐/g,    '$1$2☑');
           }
-        }
+          newRow[resultCol] = cellText;
+          return newRow;
+        });
+        await writeSheet(spreadsheetToken, sheetId, `A2:${endCol}${endRow}`, writeValues);
+        console.log('[fillReport] final_result sheet written');
       }
 
-      // ── Remarks and Photos blocks between this table and the next ──────────
+      // ── Remarks and Photos (Docs text blocks between sheets) ───────────────
       const nextTblRootIdx = tableBlockIds
         .map(id => rootChildren.indexOf(id))
         .filter(idx => idx > tblRootIdx)
@@ -811,12 +772,12 @@ export async function fillReportIntoDoc(documentId, items, session, env) {
         const data = await res.json();
         if (data.code === 0) {
           tblPhotoOffset++;
-          console.log('[fillReport] table photo inserted for', item.check_id, 'at', insertIdx);
+          console.log('[fillReport] photo inserted for', item.check_id, 'at', insertIdx);
         } else {
-          console.error('[fillReport] table photo insert failed:', JSON.stringify(data).slice(0, 200));
+          console.error('[fillReport] photo insert failed:', JSON.stringify(data).slice(0, 200));
         }
       } catch (e) {
-        console.error('[fillReport] table photo error:', item.check_id, e.message);
+        console.error('[fillReport] photo error:', item.check_id, e.message);
       }
     }
 
